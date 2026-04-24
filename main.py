@@ -68,12 +68,21 @@ DASL_CLIENT_SECRET_NAME = os.environ.get(
 )
 
 
-def _get_credentials() -> service_account.Credentials:
-    """Load service account credentials from the JSON key file."""
-    return service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_KEY_PATH,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-    )
+def _get_credentials() -> Optional[service_account.Credentials]:
+    """Return service account credentials from JSON key if present, else None.
+
+    When None is returned, Google client libraries fall back to Application
+    Default Credentials (ADC) — which works in Cloud Shell, Cloud Functions,
+    Cloud Run, and anywhere `gcloud auth application-default login` has run.
+    """
+    if SERVICE_ACCOUNT_KEY_PATH and os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
+        logger.info("Using service account key: %s", SERVICE_ACCOUNT_KEY_PATH)
+        return service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_KEY_PATH,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+    logger.info("No service account key found; using Application Default Credentials")
+    return None
 
 
 def _get_secret(project_id: str, secret_name: str) -> str:
