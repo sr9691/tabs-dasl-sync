@@ -1,7 +1,20 @@
 """Google Cloud Function: DASL -> BigQuery sync pipeline.
 
-Extracts school data from the NAIS DASL RESTful API and loads it into
-BigQuery in a wide/columnar format (one row per school per year).
+Extracts school data from the NAIS DASL RESTful API and loads it into a
+star schema in BigQuery, then (re)builds one curated wide view per top-level
+variable category for Looker.
+
+Tables written:
+  - dim_school         one row per association school
+  - dim_variable       one row per DASL variable (includes sub_category_id
+                       and an auto-generated snake_case column_name)
+  - dim_lookup         one row per (lookup_group_id, key) choice value
+  - fact_school_data   one row per (school_id, year, var_id) data point;
+                       partitioned by year, clustered by school_id, var_id
+
+Views written (regenerated each run from dim_variable):
+  - vw_<category>      one per top-level category, ~100-600 columns,
+                       one row per (school_id, year)
 """
 
 from __future__ import annotations
@@ -11,7 +24,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import functions_framework
 import requests
@@ -34,24 +47,31 @@ DASL_ASSOC_SCHOOL_DATA_URL = f"{DASL_BASE_URL}/assocSchoolData"
 
 DASL_ACCEPT_HEADER = "Application/vnd.nais.dasl.api+json; version=1"
 
-# Historical backfill window. DASL datasets start in the early 2000s; this
-# range is generous enough to capture anything available.
-BACKFILL_START_YEAR = 2005
-YEAR_MIN = 1990
-YEAR_MAX = 2050
+# Number of reporting years to load, ending with the current calendar year.
+BACKFILL_YEARS = int(os.environ.get("BACKFILL_YEARS", "3"))
+
+# Subcategory IDs that return data on the stage server. 19, 20, 21, 28 return
+# 500 errors and are skipped. 13, 14, 22, 23, 24 have returned empty in probes
+# but we still try them in case newer data lands there.
+VALID_SUBCATEGORY_IDS = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    13, 14, 15, 16, 17, 18,
+    22, 23, 24, 25, 26, 27, 29,
+]
+# Subcategory IDs known to return 500 — skip without retries.
+BROKEN_SUBCATEGORY_IDS = {19, 20, 21, 28}
 
 MAX_RETRIES = 5
 BASE_BACKOFF_SECONDS = 2.0
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("dasl_sync")
 logger.setLevel(logging.INFO)
 
 
 # ---------------------------------------------------------------------------
-# Credentials / config
+# Credentials / Secret Manager
 # ---------------------------------------------------------------------------
-
 
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "dasl-493214")
 SERVICE_ACCOUNT_KEY_PATH = os.environ.get(
@@ -59,36 +79,25 @@ SERVICE_ACCOUNT_KEY_PATH = os.environ.get(
     os.path.join(os.path.dirname(__file__), "dasl-493214-f2b53b1573dc.json"),
 )
 
-# DASL client_id for Tabs
 DASL_CLIENT_ID = os.environ.get("DASL_CLIENT_ID", "tabs")
-
-# Name of the Secret Manager secret holding the Tabs API key (client_secret)
 DASL_CLIENT_SECRET_NAME = os.environ.get(
     "DASL_CLIENT_SECRET_NAME", "dasl-tabs-api-key"
 )
 
 
 def _get_credentials() -> Optional[service_account.Credentials]:
-    """Return service account credentials from JSON key if present, else None.
-
-    When None is returned, Google client libraries fall back to Application
-    Default Credentials (ADC) — which works in Cloud Shell, Cloud Functions,
-    Cloud Run, and anywhere `gcloud auth application-default login` has run.
-    """
     if SERVICE_ACCOUNT_KEY_PATH and os.path.exists(SERVICE_ACCOUNT_KEY_PATH):
         logger.info("Using service account key: %s", SERVICE_ACCOUNT_KEY_PATH)
         return service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_KEY_PATH,
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
-    logger.info("No service account key found; using Application Default Credentials")
+    logger.info("No service account key; using Application Default Credentials")
     return None
 
 
 def _get_secret(project_id: str, secret_name: str) -> str:
-    """Fetch the latest version of a Secret Manager secret."""
-    credentials = _get_credentials()
-    client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+    client = secretmanager.SecretManagerServiceClient(credentials=_get_credentials())
     resource = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
     response = client.access_secret_version(request={"name": resource})
     return response.payload.data.decode("UTF-8").strip()
@@ -132,7 +141,7 @@ class DaslClient:
         }
 
     def get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        """GET with exponential backoff, token refresh on 401, and rate-limit handling."""
+        """GET with exponential backoff, token refresh on 401, retry on 429/5xx."""
         attempt = 0
         while True:
             attempt += 1
@@ -144,10 +153,8 @@ class DaslClient:
                 if attempt >= MAX_RETRIES:
                     raise
                 wait = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                logger.warning(
-                    "DASL GET %s network error (%s), retry %d/%d in %.1fs",
-                    url, exc, attempt, MAX_RETRIES, wait,
-                )
+                logger.warning("DASL GET %s network error (%s), retry %d/%d in %.1fs",
+                               url, exc, attempt, MAX_RETRIES, wait)
                 time.sleep(wait)
                 continue
 
@@ -167,10 +174,8 @@ class DaslClient:
                     wait = float(retry_after) if retry_after else BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
                 except ValueError:
                     wait = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                logger.warning(
-                    "DASL GET %s -> %d, retry %d/%d in %.1fs",
-                    url, resp.status_code, attempt, MAX_RETRIES, wait,
-                )
+                logger.warning("DASL GET %s -> %d, retry %d/%d in %.1fs",
+                               url, resp.status_code, attempt, MAX_RETRIES, wait)
                 time.sleep(wait)
                 continue
 
@@ -179,121 +184,172 @@ class DaslClient:
                 return None
             return resp.json()
 
+    @staticmethod
+    def _unwrap(payload: Any, key: str) -> List[Dict[str, Any]]:
+        if payload is None:
+            return []
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            return payload.get(key) or []
+        return []
+
     def get_variable_metadata(self) -> List[Dict[str, Any]]:
-        return self.get(DASL_VARIABLE_METADATA_URL) or []
+        return self._unwrap(self.get(DASL_VARIABLE_METADATA_URL), "variableMetadata")
 
     def get_lookup_groups(self) -> List[Dict[str, Any]]:
-        return self.get(DASL_LOOKUP_GROUPS_URL) or []
+        return self._unwrap(self.get(DASL_LOOKUP_GROUPS_URL), "lookupGroups")
 
     def get_assoc_schools(self) -> List[Dict[str, Any]]:
-        return self.get(DASL_ASSOC_SCHOOL_URL) or []
+        return self._unwrap(self.get(DASL_ASSOC_SCHOOL_URL), "schoolEntries")
 
-    def get_school_data(self, school_id: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def get_school_subcategory_data(
+        self, school_id: str, year: int, sub_category_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return the `schoolEntry` dict for one (school, year, subcategory) slice."""
         url = f"{DASL_ASSOC_SCHOOL_DATA_URL}/{school_id}"
-        params = {"year": year} if year is not None else None
+        params = {"year": year, "subCategoryId": sub_category_id}
         try:
-            return self.get(url, params=params)
+            payload = self.get(url, params=params)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else None
             if status in (404, 204):
                 return None
             raise
+        if not isinstance(payload, dict):
+            return None
+        return payload.get("schoolEntry")
 
 
 # ---------------------------------------------------------------------------
-# Helpers: column name sanitization, value cleaning
+# Helpers: column name generation, value coercion
 # ---------------------------------------------------------------------------
-
 
 _COLUMN_STRIP_RE = re.compile(r"[^a-zA-Z0-9_]")
+_NUMERIC_DATA_TYPES = {"integer", "int", "float", "double", "decimal", "currency", "number"}
+_CHOICE_DATA_TYPES = {"choicesingle", "choicemulti"}
+
+# Text substitutions applied to question/section text BEFORE sanitization.
+# Order matters — applied top to bottom on lowercased input. Anchored to whole
+# words/phrases via the surrounding regex assertions to avoid mangling.
+# The goal: produce concise, readable snake_case column names.
+_LABEL_REPLACEMENTS: List[Tuple[str, str]] = [
+    # Drop redundant prefix that just describes the variable group
+    (r"\bgrade\s*1\s*to\s*grade\s*12\b[:\s]*", ""),
+    # Section-level abbreviations (boarding types) — applied to section text
+    (r"\b5[\s-]*day\s+boarding\b", "b5"),
+    (r"\b7[\s-]*day\s+boarding\b", "b7"),
+    (r"\b5[\s-]*day\s+domestic\s+boarders[\w\s]*", "b5_domestic"),
+    (r"\b7[\s-]*day\s+domestic\s+boarders[\w\s]*", "b7_domestic"),
+    (r"\bday\s+students\b", "day"),
+    # Fee-type compaction
+    (r"\btuition\s+and\s+fees\b", "tuition_fees"),
+    (r"\btuition\s+only\b", "tuition"),
+    (r"\bfees\s+only\b", "fees"),
+    # Grade level compaction: "Grade 9" -> "g9", "PK-5" -> "pk5"
+    (r"\bgrade\s+(\d+)\b", r"g\1"),
+    (r"\bpre[\s-]*kindergarten\b", "pk"),
+    (r"\bkindergarten\s+part[\s-]*time\b", "k_pt"),
+    (r"\bkindergarten\s+full[\s-]*day\b", "k_full"),
+    (r"\bkindergarten\b", "k"),
+    (r"\bpre[\s-]*first(?:\s+grade)?\b", "pre_first"),
+    (r"\bpreschool\b", "ps"),
+    # Trailing parenthetical noise like "(TABS)" or "(through 2018-19)"
+    (r"\s*\(tabs\)", ""),
+    (r"\s*\(through\s+\d{4}-\d{2,4}\)", "_legacy"),
+    # Common verbose phrases
+    # Percentage range — run BEFORE "family paying" prefix so word boundaries
+    # work correctly on " 60-99%" rather than after underscore prefixing.
+    (r"(\d+)\s*[-\s]\s*(\d+)\s*%\s*of\s+tuition", r"\1_\2pct"),
+    (r"\bfamily\s+paying\s+", "fam_pay_"),
+    (r"\bfull\s+tuition\b", "full"),
+    (r"\bno\s+tuition\b", "none"),
+    (r"\btotal\s+count\s+of\s+", "count_"),
+    # Strip filler
+    (r"\b(of|the|for|on|in|at|to|a|an)\b", ""),
+]
+_LABEL_RES = [(re.compile(p, re.IGNORECASE), r) for p, r in _LABEL_REPLACEMENTS]
+
+
+def _clean_label_text(text: str) -> str:
+    """Apply readability-focused substitutions before snake-casing."""
+    s = (text or "").strip().lower()
+    for rx, repl in _LABEL_RES:
+        s = rx.sub(repl, s)
+    return s
 
 
 def sanitize_column_name(label: str) -> str:
-    if label is None:
+    if not label:
         return ""
-    name = label.strip().lower()
-    name = name.replace(" ", "_").replace("-", "_")
+    name = label.strip().lower().replace(" ", "_").replace("-", "_")
     name = _COLUMN_STRIP_RE.sub("", name)
-    name = name[:300]
+    # Collapse runs of underscores from substitution
+    name = re.sub(r"_+", "_", name).strip("_")
+    name = name[:200]
     if name and name[0].isdigit():
         name = f"v_{name}"
     return name
 
 
-def build_column_map(
-    variable_metadata: List[Dict[str, Any]],
-) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
-    """Return (var_id -> column_name, var_id -> metadata dict).
+def _candidate_column_name(label: str) -> str:
+    """Derive a compact snake_case name from a 4-level arrow-delimited label.
 
-    Collisions on sanitized column names are disambiguated with a numeric suffix.
+    Strategy: combine the last meaningful path part (question) with the section
+    when sections meaningfully disambiguate (boarding types, day students, etc).
+    Apply _clean_label_text first to compress redundant phrasing.
     """
-    var_to_col: Dict[str, str] = {}
-    var_to_meta: Dict[str, Dict[str, Any]] = {}
+    parts = [p.strip() for p in (label or "").split(" -> ")]
+    while len(parts) < 4:
+        parts.append("")
+    _, _, section, question = parts[:4]
+
+    # Don't let section duplicate subcategory text — e.g. "Tuition and Fees" appears
+    # at multiple levels; we only care about it as a real differentiator (boarding etc).
+    cleaned_q = _clean_label_text(question)
+    cleaned_s = _clean_label_text(section)
+
+    # If section is generic ("Tuition and Fees" repeated, "School Characteristics" etc.)
+    # don't prefix; otherwise include it as a disambiguator.
+    SKIP_SECTIONS = {
+        "tuition_fees", "tuition", "school_characteristics", "school",
+        "demographic_variables", "students", "advancement", "financial_aid",
+        "admission_attrition", "additional_questions", "",
+    }
+
+    base = cleaned_q
+    if cleaned_s and cleaned_s not in SKIP_SECTIONS and cleaned_s not in cleaned_q:
+        base = f"{cleaned_s}_{cleaned_q}"
+
+    return sanitize_column_name(base)
+
+
+def build_column_names(variables: List[Dict[str, Any]]) -> Dict[int, str]:
+    """varId -> compact snake_case column_name. Collisions get numeric suffixes."""
     used: Dict[str, int] = {}
-    for meta in variable_metadata:
-        var_id = str(meta.get("varId"))
-        label = meta.get("label") or var_id
-        col = sanitize_column_name(label) or f"v_{var_id}"
+    result: Dict[int, str] = {}
+    for v in variables:
+        var_id = v.get("varId")
+        if var_id is None:
+            continue
+        col = _candidate_column_name(v.get("label") or "") or f"var_{var_id}"
         if col in used:
             used[col] += 1
             col = f"{col}_{used[col]}"
         else:
             used[col] = 0
-        var_to_col[var_id] = col
-        var_to_meta[var_id] = meta
-    return var_to_col, var_to_meta
+        result[var_id] = col
+    return result
 
 
-def build_lookup_index(
-    lookup_groups: List[Dict[str, Any]],
-) -> Dict[str, set]:
-    """Index: lookupGroupId -> set of valid keys (as strings)."""
-    index: Dict[str, set] = {}
-    for group in lookup_groups:
-        gid = str(group.get("lookupGroupId") or group.get("id") or "")
-        if not gid:
-            continue
-        items = group.get("items") or group.get("values") or group.get("lookups") or []
-        keys: set = set()
-        for item in items:
-            if isinstance(item, dict):
-                key = item.get("key") or item.get("value") or item.get("id")
-            else:
-                key = item
-            if key is not None:
-                keys.add(str(key).strip())
-        index[gid] = keys
-    return index
-
-
-class CleaningStats:
-    def __init__(self) -> None:
-        self.nullified = 0
-        self.skipped_rows = 0
-        self.warnings = 0
-
-    def as_dict(self) -> Dict[str, int]:
-        return {
-            "nullified": self.nullified,
-            "skipped_rows": self.skipped_rows,
-            "warnings": self.warnings,
-        }
-
-
-def _is_na(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str) and value.strip().upper() == "NA":
-        return True
-    return False
-
-
-def _clean_numeric(value: Any) -> Optional[float]:
-    if _is_na(value):
+def _coerce_numeric(raw: Any) -> Optional[float]:
+    if raw is None or raw == "":
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    s = re.sub(r"[^0-9.\-eE]", "", str(value))
+    if isinstance(raw, bool):
+        return float(raw)
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = re.sub(r"[^0-9.\-eE]", "", str(raw))
     if not s or s in ("-", ".", "-.", ".-"):
         return None
     try:
@@ -302,23 +358,21 @@ def _clean_numeric(value: Any) -> Optional[float]:
         return None
 
 
-def _clean_string(value: Any) -> Optional[str]:
-    if _is_na(value):
+def _coerce_string(raw: Any) -> Optional[str]:
+    if raw is None:
         return None
-    s = str(value).strip()
+    s = str(raw).strip()
     return s if s else None
 
 
-def _clean_timestamp(value: Any) -> Optional[str]:
-    if _is_na(value):
+def _normalize_timestamp(raw: Any) -> Optional[str]:
+    if not raw:
         return None
-    s = str(value).strip()
+    s = str(raw).strip()
     if not s:
         return None
-    # Normalize trailing Z to +00:00 so fromisoformat accepts it.
-    candidate = s.replace("Z", "+00:00")
     try:
-        dt = datetime.fromisoformat(candidate)
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).isoformat()
@@ -326,344 +380,489 @@ def _clean_timestamp(value: Any) -> Optional[str]:
         return None
 
 
-def clean_data_point(
-    var_id: str,
-    raw_value: Any,
-    var_meta: Dict[str, Any],
-    lookup_index: Dict[str, set],
-    stats: CleaningStats,
-) -> Any:
-    data_type = (var_meta.get("dataType") or "").strip()
-    lookup_group_id = str(var_meta.get("lookupGroupId") or "")
-
-    if _is_na(raw_value):
-        return None
-
-    dt_lower = data_type.lower()
-
-    if dt_lower in ("integer", "int"):
-        n = _clean_numeric(raw_value)
-        if n is None:
-            stats.nullified += 1
-            return None
-        return int(n)
-
-    if dt_lower in ("float", "double", "decimal", "currency", "number"):
-        n = _clean_numeric(raw_value)
-        if n is None:
-            stats.nullified += 1
-            return None
-        return n
-
-    if dt_lower == "choicesingle":
-        s = _clean_string(raw_value)
-        if s is None:
-            return None
-        valid = lookup_index.get(lookup_group_id)
-        if valid is not None and s not in valid:
-            logger.warning(
-                "choiceSingle value '%s' not in lookup group %s for varId %s",
-                s, lookup_group_id, var_id,
-            )
-            stats.warnings += 1
-            stats.nullified += 1
-            return None
-        return s
-
-    if dt_lower == "choicemulti":
-        s = _clean_string(raw_value)
-        if s is None:
-            return None
-        valid = lookup_index.get(lookup_group_id)
-        parts = [p.strip() for p in s.split(",") if p.strip()]
-        cleaned_parts: List[str] = []
-        for p in parts:
-            if valid is not None and p not in valid:
-                logger.warning(
-                    "choiceMulti value '%s' not in lookup group %s for varId %s",
-                    p, lookup_group_id, var_id,
-                )
-                stats.warnings += 1
-                continue
-            cleaned_parts.append(p)
-        if not cleaned_parts:
-            return None
-        return ",".join(cleaned_parts)
-
-    # Default: treat as string
-    return _clean_string(raw_value)
-
-
 # ---------------------------------------------------------------------------
-# BigQuery helpers
+# BigQuery schema
 # ---------------------------------------------------------------------------
 
-BASE_COLUMNS: List[Tuple[str, str]] = [
-    ("school_id", "STRING"),
-    ("school_name", "STRING"),
-    ("year", "INTEGER"),
-    ("last_updated", "TIMESTAMP"),
+DIM_SCHOOL_SCHEMA = [
+    bigquery.SchemaField("school_id", "STRING", "REQUIRED"),
+    bigquery.SchemaField("dasl_school_id", "STRING"),
+    bigquery.SchemaField("school_name", "STRING"),
+    bigquery.SchemaField("city", "STRING"),
+    bigquery.SchemaField("state_code", "STRING"),
+    bigquery.SchemaField("cola_index", "FLOAT"),
+    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+]
+
+DIM_VARIABLE_SCHEMA = [
+    bigquery.SchemaField("var_id", "INTEGER", "REQUIRED"),
+    bigquery.SchemaField("category", "STRING"),
+    bigquery.SchemaField("subcategory", "STRING"),
+    bigquery.SchemaField("section", "STRING"),
+    bigquery.SchemaField("question", "STRING"),
+    bigquery.SchemaField("label", "STRING"),
+    bigquery.SchemaField("data_type", "STRING"),
+    bigquery.SchemaField("sub_category_id", "INTEGER"),
+    bigquery.SchemaField("lookup_group_id", "INTEGER"),
+    bigquery.SchemaField("association_specific", "BOOLEAN"),
+    bigquery.SchemaField("column_name", "STRING"),
+    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+]
+
+DIM_LOOKUP_SCHEMA = [
+    bigquery.SchemaField("lookup_group_id", "INTEGER", "REQUIRED"),
+    bigquery.SchemaField("group_name", "STRING"),
+    bigquery.SchemaField("lookup_key", "STRING", "REQUIRED"),
+    bigquery.SchemaField("lookup_value", "STRING"),
+    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+]
+
+FACT_SCHOOL_DATA_SCHEMA = [
+    bigquery.SchemaField("school_id", "STRING", "REQUIRED"),
+    bigquery.SchemaField("year", "INTEGER", "REQUIRED"),
+    bigquery.SchemaField("var_id", "INTEGER", "REQUIRED"),
+    bigquery.SchemaField("value_numeric", "FLOAT"),
+    bigquery.SchemaField("value_string", "STRING"),
+    bigquery.SchemaField("value_choice", "STRING"),
+    bigquery.SchemaField("value_choice_label", "STRING"),
+    bigquery.SchemaField("is_na", "BOOLEAN"),
+    bigquery.SchemaField("sub_category_id", "INTEGER"),
+    bigquery.SchemaField("last_updated", "TIMESTAMP"),
+    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
 ]
 
 
-def _bq_type_for_data_type(data_type: str) -> str:
-    dt = (data_type or "").lower()
-    if dt in ("integer", "int"):
-        return "INTEGER"
-    if dt in ("float", "double", "decimal", "currency", "number"):
-        return "FLOAT"
-    return "STRING"
+def _qualify(project: str, dataset: str, table: str) -> str:
+    return f"{project}.{dataset}.{table}"
 
 
-def build_table_schema(
-    var_to_col: Dict[str, str],
-    var_to_meta: Dict[str, Dict[str, Any]],
-) -> List[bigquery.SchemaField]:
-    schema = [bigquery.SchemaField(name, type_) for name, type_ in BASE_COLUMNS]
-    seen = {name for name, _ in BASE_COLUMNS}
-    for var_id, col in var_to_col.items():
-        if col in seen:
-            continue
-        seen.add(col)
-        bq_type = _bq_type_for_data_type(var_to_meta[var_id].get("dataType", ""))
-        schema.append(bigquery.SchemaField(col, bq_type))
-    return schema
+def ensure_dataset(bq: bigquery.Client, project: str, dataset: str, location: str = "US") -> None:
+    ref = bigquery.DatasetReference(project, dataset)
+    try:
+        bq.get_dataset(ref)
+    except NotFound:
+        logger.info("Creating dataset %s.%s in %s", project, dataset, location)
+        ds = bigquery.Dataset(ref)
+        ds.location = location
+        bq.create_dataset(ds)
 
 
-def ensure_table(
+def replace_table(
     bq: bigquery.Client,
     table_ref: str,
+    rows: List[Dict[str, Any]],
     schema: List[bigquery.SchemaField],
-) -> Tuple[bigquery.Table, bool]:
-    """Return (table, created_now). Adds any new columns to an existing table."""
+) -> None:
+    """Truncate and reload a table via a JSON load job."""
+    job_config = bigquery.LoadJobConfig(
+        schema=schema,
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+    )
+    logger.info("Replacing %s with %d rows", table_ref, len(rows))
+    job = bq.load_table_from_json(rows or [{}][:0], table_ref, job_config=job_config)
+    job.result()
+
+
+def ensure_fact_table(bq: bigquery.Client, table_ref: str) -> None:
     try:
-        table = bq.get_table(table_ref)
-        existing = {f.name for f in table.schema}
-        new_fields = [f for f in schema if f.name not in existing]
-        if new_fields:
-            logger.info("Adding %d new columns to %s", len(new_fields), table_ref)
-            table.schema = list(table.schema) + new_fields
-            table = bq.update_table(table, ["schema"])
-        return table, False
+        bq.get_table(table_ref)
+        return
     except NotFound:
-        logger.info("Creating BigQuery table %s", table_ref)
-        table = bigquery.Table(table_ref, schema=schema)
-        table = bq.create_table(table)
-        return table, True
+        pass
+    logger.info("Creating fact table %s", table_ref)
+    table = bigquery.Table(table_ref, schema=FACT_SCHOOL_DATA_SCHEMA)
+    table.time_partitioning = bigquery.TimePartitioning(
+        type_=bigquery.TimePartitioningType.YEAR,
+        field=None,  # range partitioning set below
+    )
+    # Range partition on year (integer), clustered by school_id, var_id.
+    table.time_partitioning = None
+    table.range_partitioning = bigquery.RangePartitioning(
+        field="year",
+        range_=bigquery.PartitionRange(start=2000, end=2100, interval=1),
+    )
+    table.clustering_fields = ["school_id", "var_id"]
+    bq.create_table(table)
 
 
-def fetch_existing_keys(bq: bigquery.Client, table_ref: str) -> set:
-    query = f"SELECT school_id, year FROM `{table_ref}`"
-    keys: set = set()
-    for row in bq.query(query).result():
-        keys.add((row["school_id"], row["year"]))
-    return keys
+def replace_fact_slices(
+    bq: bigquery.Client,
+    table_ref: str,
+    rows: List[Dict[str, Any]],
+    slices: List[Tuple[str, int]],
+) -> None:
+    """Delete then append rows for the specified (school_id, year) slices."""
+    if not slices:
+        return
+    # DELETE existing rows for the slices we're about to load.
+    slice_filter = " OR ".join(
+        f"(school_id = @sid_{i} AND year = @yr_{i})" for i in range(len(slices))
+    )
+    query = f"DELETE FROM `{table_ref}` WHERE {slice_filter}"
+    params: List[bigquery.ScalarQueryParameter] = []
+    for i, (sid, yr) in enumerate(slices):
+        params.append(bigquery.ScalarQueryParameter(f"sid_{i}", "STRING", sid))
+        params.append(bigquery.ScalarQueryParameter(f"yr_{i}", "INT64", yr))
+    logger.info("Deleting existing fact rows for %d slices", len(slices))
+    bq.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+
+    if rows:
+        job_config = bigquery.LoadJobConfig(
+            schema=FACT_SCHOOL_DATA_SCHEMA,
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        )
+        logger.info("Appending %d rows to %s", len(rows), table_ref)
+        job = bq.load_table_from_json(rows, table_ref, job_config=job_config)
+        job.result()
 
 
 # ---------------------------------------------------------------------------
-# Pipeline
+# Row builders
 # ---------------------------------------------------------------------------
 
 
-def _discover_years(
-    client: DaslClient, schools: List[Dict[str, Any]]
-) -> List[int]:
-    """Discover the set of years with data by probing a sample school across the backfill window."""
-    current_year = datetime.now(timezone.utc).year
-    years_available: set = set()
-    sample = schools[: min(5, len(schools))]
-    for school in sample:
-        sid = str(school.get("schoolId"))
-        for y in range(BACKFILL_START_YEAR, current_year + 1):
-            try:
-                payload = client.get_school_data(sid, year=y)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Probe failed for school %s year %s: %s", sid, y, exc)
-                continue
-            if payload and payload.get("dataPoints"):
-                years_available.add(y)
-    if not years_available:
-        # Fall back to the full window
-        return list(range(BACKFILL_START_YEAR, current_year + 1))
-    return sorted(years_available)
+def build_dim_school_rows(schools: List[Dict[str, Any]], now_iso: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for s in schools:
+        sid = _coerce_string(s.get("schoolId"))
+        if not sid:
+            continue  # schools without schoolId can't appear in fact_school_data anyway
+        rows.append({
+            "school_id": sid,
+            "dasl_school_id": _coerce_string(s.get("daslSchoolId")),
+            "school_name": _coerce_string(s.get("schoolName")),
+            "city": _coerce_string(s.get("city")),
+            "state_code": _coerce_string(s.get("stateCode")),
+            "cola_index": s.get("colaIndex"),
+            "loaded_at": now_iso,
+        })
+    return rows
 
 
-def build_row(
-    payload: Dict[str, Any],
-    var_to_col: Dict[str, str],
-    var_to_meta: Dict[str, Dict[str, Any]],
-    lookup_index: Dict[str, set],
-    stats: CleaningStats,
+def build_dim_variable_rows(
+    variables: List[Dict[str, Any]],
+    column_names: Dict[int, str],
+    varid_to_subcat: Dict[int, int],
+    now_iso: str,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for v in variables:
+        vid = v.get("varId")
+        if vid is None:
+            continue
+        label = v.get("label") or ""
+        parts = [p.strip() for p in label.split(" -> ")]
+        parts += [""] * (4 - len(parts))
+        rows.append({
+            "var_id": vid,
+            "category": parts[0],
+            "subcategory": parts[1],
+            "section": parts[2],
+            "question": parts[3],
+            "label": label,
+            "data_type": _coerce_string(v.get("dataType")),
+            "sub_category_id": varid_to_subcat.get(vid),
+            "lookup_group_id": v.get("lookupGroupId"),
+            "association_specific": v.get("associationSpecific"),
+            "column_name": column_names.get(vid),
+            "loaded_at": now_iso,
+        })
+    return rows
+
+
+def build_dim_lookup_rows(lookup_groups: List[Dict[str, Any]], now_iso: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for g in lookup_groups:
+        gid = g.get("lookupGroupId")
+        gname = _coerce_string(g.get("name"))
+        items = g.get("items") or g.get("values") or g.get("lookups") or []
+        for item in items:
+            if isinstance(item, dict):
+                rows.append({
+                    "lookup_group_id": gid,
+                    "group_name": gname,
+                    "lookup_key": _coerce_string(item.get("key") or item.get("id")),
+                    "lookup_value": _coerce_string(item.get("value") or item.get("label")),
+                    "loaded_at": now_iso,
+                })
+    return rows
+
+
+def build_fact_row(
+    school_id: str,
+    year: int,
+    data_point: Dict[str, Any],
+    sub_category_id: int,
+    last_updated: Optional[str],
+    data_type_by_varid: Dict[int, str],
+    lookup_value_map: Dict[Tuple[int, str], str],
+    lookup_group_by_varid: Dict[int, int],
+    now_iso: str,
 ) -> Optional[Dict[str, Any]]:
-    school_id = _clean_string(payload.get("schoolId"))
-    school_name = _clean_string(payload.get("schoolName"))
-    if not school_id:
-        logger.warning("Skipping row with empty school_id: %s", payload)
-        stats.skipped_rows += 1
-        stats.warnings += 1
+    vid = data_point.get("varId")
+    if vid is None:
         return None
+    raw = data_point.get("value")
+    is_na = bool(data_point.get("isNA"))
+    dtype = (data_type_by_varid.get(vid) or "").lower()
 
-    year_raw = payload.get("year")
-    try:
-        year = int(year_raw)
-    except (TypeError, ValueError):
-        logger.warning("Skipping row with unparseable year %r for school %s", year_raw, school_id)
-        stats.skipped_rows += 1
-        stats.warnings += 1
-        return None
-    if year < YEAR_MIN or year > YEAR_MAX:
-        logger.warning("Skipping row with out-of-range year %d for school %s", year, school_id)
-        stats.skipped_rows += 1
-        stats.warnings += 1
-        return None
+    value_numeric: Optional[float] = None
+    value_string: Optional[str] = None
+    value_choice: Optional[str] = None
+    value_choice_label: Optional[str] = None
 
-    last_updated = _clean_timestamp(payload.get("lastUpdated"))
-    if payload.get("lastUpdated") and last_updated is None:
-        logger.warning("Unparseable lastUpdated %r for school %s/%d", payload.get("lastUpdated"), school_id, year)
-        stats.warnings += 1
+    if not is_na and raw not in (None, ""):
+        if dtype in _NUMERIC_DATA_TYPES:
+            value_numeric = _coerce_numeric(raw)
+        elif dtype in _CHOICE_DATA_TYPES:
+            value_choice = _coerce_string(raw)
+            if value_choice is not None:
+                grp = lookup_group_by_varid.get(vid)
+                if grp is not None:
+                    # For choiceMulti, value may be comma-separated — resolve each.
+                    parts = [p.strip() for p in value_choice.split(",") if p.strip()]
+                    labels = [
+                        lookup_value_map.get((grp, p), p) for p in parts
+                    ]
+                    value_choice_label = ", ".join(labels) if labels else None
+        else:
+            value_string = _coerce_string(raw)
 
-    row: Dict[str, Any] = {
+    return {
         "school_id": school_id,
-        "school_name": school_name,
         "year": year,
+        "var_id": vid,
+        "value_numeric": value_numeric,
+        "value_string": value_string,
+        "value_choice": value_choice,
+        "value_choice_label": value_choice_label,
+        "is_na": is_na,
+        "sub_category_id": sub_category_id,
         "last_updated": last_updated,
+        "loaded_at": now_iso,
     }
 
-    for dp in payload.get("dataPoints") or []:
-        var_id = str(dp.get("varId"))
-        col = var_to_col.get(var_id)
-        if not col:
-            continue  # unknown variable (not in metadata)
-        meta = var_to_meta.get(var_id, {})
-        row[col] = clean_data_point(var_id, dp.get("value"), meta, lookup_index, stats)
 
-    return row
+# ---------------------------------------------------------------------------
+# View generator
+# ---------------------------------------------------------------------------
 
 
-def deduplicate_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Keep the row with the most recent last_updated per (school_id, year)."""
-    best: Dict[Tuple[str, int], Dict[str, Any]] = {}
-    for row in rows:
-        key = (row["school_id"], row["year"])
-        existing = best.get(key)
-        if existing is None:
-            best[key] = row
-            continue
-        a = row.get("last_updated") or ""
-        b = existing.get("last_updated") or ""
-        if a > b:
-            best[key] = row
-    return list(best.values())
+def _safe_view_suffix(category: str) -> str:
+    suffix = sanitize_column_name(category) or "misc"
+    return f"vw_{suffix}"
 
 
-def run(
-    project_id: str,
+def rebuild_category_views(
+    bq: bigquery.Client,
+    project: str,
     dataset: str,
-    table: str,
-) -> Dict[str, Any]:
+    variables: List[Dict[str, Any]],
+    column_names: Dict[int, str],
+    varid_to_subcat: Dict[int, int],
+) -> List[str]:
+    """One view per top-level category. Returns list of view IDs created."""
+    fact = f"`{_qualify(project, dataset, 'fact_school_data')}`"
+    school = f"`{_qualify(project, dataset, 'dim_school')}`"
+
+    # Group varIds by top-level category; include only those that applied on probe
+    by_category: Dict[str, List[Dict[str, Any]]] = {}
+    for v in variables:
+        vid = v.get("varId")
+        if vid is None or vid not in varid_to_subcat:
+            continue  # only expose variables we actually pull
+        label = v.get("label") or ""
+        cat = (label.split(" -> ")[0] if label else "").strip() or "Misc"
+        by_category.setdefault(cat, []).append(v)
+
+    created: List[str] = []
+    for category, vars_in_cat in by_category.items():
+        view_name = _safe_view_suffix(category)
+        view_id = _qualify(project, dataset, view_name)
+        select_exprs: List[str] = []
+        used: Dict[str, int] = {}
+        for v in vars_in_cat:
+            vid = v.get("varId")
+            col = column_names.get(vid)
+            if not col:
+                continue
+            if col in used:
+                used[col] += 1
+                col = f"{col}_{used[col]}"
+            else:
+                used[col] = 0
+            dtype = (v.get("dataType") or "").lower()
+            if dtype in _NUMERIC_DATA_TYPES:
+                expr = f"MAX(IF(f.var_id = {vid}, f.value_numeric, NULL)) AS {col}"
+            elif dtype in _CHOICE_DATA_TYPES:
+                expr = (
+                    f"MAX(IF(f.var_id = {vid}, "
+                    f"COALESCE(f.value_choice_label, f.value_choice), NULL)) AS {col}"
+                )
+            else:
+                expr = f"MAX(IF(f.var_id = {vid}, f.value_string, NULL)) AS {col}"
+            select_exprs.append("  " + expr)
+
+        if not select_exprs:
+            continue
+
+        var_ids = ", ".join(str(v["varId"]) for v in vars_in_cat if v.get("varId") is not None)
+        sql = (
+            f"CREATE OR REPLACE VIEW `{view_id}` AS\n"
+            f"SELECT\n"
+            f"  f.school_id,\n"
+            f"  s.school_name,\n"
+            f"  s.state_code,\n"
+            f"  f.year,\n"
+            + ",\n".join(select_exprs) + "\n"
+            f"FROM {fact} f\n"
+            f"LEFT JOIN {school} s USING (school_id)\n"
+            f"WHERE f.var_id IN ({var_ids})\n"
+            f"GROUP BY f.school_id, s.school_name, s.state_code, f.year;\n"
+        )
+        logger.info("Creating view %s (%d columns)", view_id, len(select_exprs))
+        bq.query(sql).result()
+        created.append(view_id)
+    return created
+
+
+# ---------------------------------------------------------------------------
+# Pipeline orchestration
+# ---------------------------------------------------------------------------
+
+
+def run(project_id: str, dataset: str) -> Dict[str, Any]:
     logger.info("Starting DASL -> BigQuery pipeline (base URL: %s)", DASL_BASE_URL)
-
-    client_secret = _get_secret(project_id, DASL_CLIENT_SECRET_NAME)
-
-    dasl = DaslClient(DASL_CLIENT_ID, client_secret)
-    dasl.authenticate()
-
-    logger.info("Fetching variable metadata")
-    variable_metadata = dasl.get_variable_metadata()
-    logger.info("Fetched %d variables", len(variable_metadata))
-    var_to_col, var_to_meta = build_column_map(variable_metadata)
-
-    logger.info("Fetching lookup groups")
-    lookup_groups = dasl.get_lookup_groups()
-    lookup_index = build_lookup_index(lookup_groups)
-    logger.info("Indexed %d lookup groups", len(lookup_index))
-
-    logger.info("Fetching association schools")
-    schools = dasl.get_assoc_schools()
-    logger.info("Fetched %d schools", len(schools))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    current_year = datetime.now(timezone.utc).year
+    years = list(range(current_year - BACKFILL_YEARS + 1, current_year + 1))
+    logger.info("Loading years: %s", years)
 
     credentials = _get_credentials()
     bq = bigquery.Client(project=project_id, credentials=credentials)
-    table_ref = f"{project_id}.{dataset}.{table}"
-    schema = build_table_schema(var_to_col, var_to_meta)
-    bq_table, created_now = ensure_table(bq, table_ref, schema)
+    ensure_dataset(bq, project_id, dataset)
 
-    if created_now:
-        logger.info("New table created — running full historical backfill")
-        years = _discover_years(dasl, schools)
-        existing_keys: set = set()
-    else:
-        logger.info("Existing table — running current-year append")
-        years = [datetime.now(timezone.utc).year]
-        existing_keys = fetch_existing_keys(bq, table_ref)
+    # --- Auth + metadata --------------------------------------------------
+    client_secret = _get_secret(project_id, DASL_CLIENT_SECRET_NAME)
+    dasl = DaslClient(DASL_CLIENT_ID, client_secret)
+    dasl.authenticate()
 
-    logger.info("Years to load: %s", years)
+    variables = dasl.get_variable_metadata()
+    lookup_groups = dasl.get_lookup_groups()
+    schools = dasl.get_assoc_schools()
+    mapped_schools = [s for s in schools if _coerce_string(s.get("schoolId"))]
+    logger.info(
+        "Metadata: %d variables, %d lookup groups, %d schools (%d mapped)",
+        len(variables), len(lookup_groups), len(schools), len(mapped_schools),
+    )
 
-    stats = CleaningStats()
-    collected_rows: List[Dict[str, Any]] = []
-
-    for idx, school in enumerate(schools, start=1):
-        sid = str(school.get("schoolId"))
-        if not sid:
-            logger.warning("School entry missing schoolId, skipping: %s", school)
-            stats.skipped_rows += 1
+    # Convenience indexes
+    column_names = build_column_names(variables)
+    data_type_by_varid = {v["varId"]: (v.get("dataType") or "") for v in variables if v.get("varId") is not None}
+    lookup_group_by_varid = {
+        v["varId"]: v["lookupGroupId"]
+        for v in variables
+        if v.get("varId") is not None and v.get("lookupGroupId") is not None
+    }
+    lookup_value_map: Dict[Tuple[int, str], str] = {}
+    for g in lookup_groups:
+        gid = g.get("lookupGroupId")
+        if gid is None:
             continue
+        for item in g.get("items") or []:
+            if isinstance(item, dict):
+                key = item.get("key") or item.get("id")
+                val = item.get("value") or item.get("label") or key
+                if key is not None:
+                    lookup_value_map[(gid, str(key))] = str(val)
+
+    # --- Fetch data points -----------------------------------------------
+    varid_to_subcat: Dict[int, int] = {}
+    fact_rows: List[Dict[str, Any]] = []
+    slices: List[Tuple[str, int]] = []
+    api_calls = 0
+    api_errors = 0
+
+    for school in mapped_schools:
+        sid = school["schoolId"]
         for year in years:
-            try:
-                payload = dasl.get_school_data(sid, year=year)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Failed to fetch school %s year %s: %s", sid, year, exc)
-                stats.warnings += 1
-                continue
-            if not payload:
-                continue
-            # Ensure school metadata present in payload
-            payload.setdefault("schoolId", sid)
-            payload.setdefault("schoolName", school.get("schoolName"))
-            payload.setdefault("year", year)
-            row = build_row(payload, var_to_col, var_to_meta, lookup_index, stats)
-            if row is not None:
-                collected_rows.append(row)
-        if idx % 25 == 0:
-            logger.info("Processed %d/%d schools", idx, len(schools))
+            slices.append((sid, year))
+            last_updated_for_slice: Optional[str] = None
+            for scid in VALID_SUBCATEGORY_IDS:
+                if scid in BROKEN_SUBCATEGORY_IDS:
+                    continue
+                api_calls += 1
+                try:
+                    entry = dasl.get_school_subcategory_data(sid, year, scid)
+                except Exception as exc:  # noqa: BLE001
+                    api_errors += 1
+                    logger.warning("school=%s year=%d subcat=%d failed: %s", sid, year, scid, exc)
+                    continue
+                if not entry:
+                    continue
+                last_updated = _normalize_timestamp(entry.get("lastUpdated"))
+                if last_updated and (not last_updated_for_slice or last_updated > last_updated_for_slice):
+                    last_updated_for_slice = last_updated
+                for dp in entry.get("dataPoints") or []:
+                    vid = dp.get("varId")
+                    if vid is not None:
+                        varid_to_subcat.setdefault(vid, scid)
+                    row = build_fact_row(
+                        school_id=sid,
+                        year=year,
+                        data_point=dp,
+                        sub_category_id=scid,
+                        last_updated=last_updated,
+                        data_type_by_varid=data_type_by_varid,
+                        lookup_value_map=lookup_value_map,
+                        lookup_group_by_varid=lookup_group_by_varid,
+                        now_iso=now_iso,
+                    )
+                    if row is not None:
+                        fact_rows.append(row)
+        logger.info("Finished school %s: running fact_rows=%d", sid, len(fact_rows))
 
-    logger.info("Collected %d raw rows", len(collected_rows))
-    deduped = deduplicate_rows(collected_rows)
-    logger.info("After in-batch dedup: %d rows", len(deduped))
+    logger.info("API calls: %d (errors: %d). Fact rows: %d",
+                api_calls, api_errors, len(fact_rows))
 
-    # Skip rows already present in the table
-    to_load = [
-        r for r in deduped if (r["school_id"], r["year"]) not in existing_keys
-    ]
-    skipped_existing = len(deduped) - len(to_load)
-    if skipped_existing:
-        logger.info("Skipped %d rows already present in BigQuery", skipped_existing)
+    # --- Write dim tables ------------------------------------------------
+    replace_table(
+        bq, _qualify(project_id, dataset, "dim_school"),
+        build_dim_school_rows(schools, now_iso), DIM_SCHOOL_SCHEMA,
+    )
+    replace_table(
+        bq, _qualify(project_id, dataset, "dim_variable"),
+        build_dim_variable_rows(variables, column_names, varid_to_subcat, now_iso),
+        DIM_VARIABLE_SCHEMA,
+    )
+    replace_table(
+        bq, _qualify(project_id, dataset, "dim_lookup"),
+        build_dim_lookup_rows(lookup_groups, now_iso), DIM_LOOKUP_SCHEMA,
+    )
 
-    loaded = 0
-    if to_load:
-        # Ensure every row has all schema columns (fill missing with None)
-        all_cols = [f.name for f in bq_table.schema]
-        normalized = []
-        for r in to_load:
-            normalized.append({c: r.get(c) for c in all_cols})
+    # --- Write fact table ------------------------------------------------
+    fact_ref = _qualify(project_id, dataset, "fact_school_data")
+    ensure_fact_table(bq, fact_ref)
+    replace_fact_slices(bq, fact_ref, fact_rows, slices)
 
-        job_config = bigquery.LoadJobConfig(
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-            schema=list(bq_table.schema),
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        )
-        logger.info("Loading %d rows into %s", len(normalized), table_ref)
-        load_job = bq.load_table_from_json(normalized, table_ref, job_config=job_config)
-        load_job.result()
-        loaded = len(normalized)
+    # --- Rebuild category views ------------------------------------------
+    views = rebuild_category_views(
+        bq, project_id, dataset, variables, column_names, varid_to_subcat,
+    )
 
     summary = {
-        "schools": len(schools),
-        "years": len(years),
-        "rows_loaded": loaded,
-        "rows_skipped_existing": skipped_existing,
-        "cleaning": stats.as_dict(),
-        "created_table": created_now,
+        "years": years,
+        "schools_total": len(schools),
+        "schools_mapped": len(mapped_schools),
+        "variables": len(variables),
+        "variables_with_data": len(varid_to_subcat),
+        "lookup_groups": len(lookup_groups),
+        "fact_rows": len(fact_rows),
+        "api_calls": api_calls,
+        "api_errors": api_errors,
+        "views_created": views,
     }
     logger.info("Pipeline summary: %s", summary)
     return summary
@@ -675,26 +874,20 @@ def run(
 
 
 @functions_framework.http
-def run_pipeline(request):  # noqa: ARG001  (request unused; triggered by HTTP)
+def run_pipeline(request):  # noqa: ARG001
     project_id = os.environ.get("GCP_PROJECT_ID", GCP_PROJECT_ID)
     dataset = os.environ.get("BQ_DATASET", "dasl")
-    table = os.environ.get("BQ_TABLE", "school_data")
-
     try:
-        summary = run(
-            project_id=project_id,
-            dataset=dataset,
-            table=table,
+        summary = run(project_id=project_id, dataset=dataset)
+        msg = (
+            f"Pipeline complete. Years: {summary['years']}, "
+            f"schools: {summary['schools_mapped']}/{summary['schools_total']}, "
+            f"variables with data: {summary['variables_with_data']}/{summary['variables']}, "
+            f"fact rows: {summary['fact_rows']}, "
+            f"API calls: {summary['api_calls']} (errors: {summary['api_errors']}), "
+            f"views: {len(summary['views_created'])}."
         )
-        message = (
-            f"Pipeline complete: {summary['schools']} schools, "
-            f"{summary['years']} years, {summary['rows_loaded']} rows loaded "
-            f"({summary['rows_skipped_existing']} already present). "
-            f"Cleaning: {summary['cleaning']['nullified']} nullified, "
-            f"{summary['cleaning']['skipped_rows']} skipped rows, "
-            f"{summary['cleaning']['warnings']} warnings."
-        )
-        return (message, 200)
+        return (msg, 200)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Pipeline failed")
         return (f"Pipeline failed: {exc}", 500)
