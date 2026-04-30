@@ -37,7 +37,7 @@ from google.oauth2 import service_account
 # ---------------------------------------------------------------------------
 
 DASL_BASE_URL = os.environ.get(
-    "DASL_BASE_URL", "https://stagedaslwebapi.azurewebsites.net"
+    "DASL_BASE_URL", "https://daslwebapi.azurewebsites.net"
 )
 DASL_AUTH_URL = f"{DASL_BASE_URL}/auth"
 DASL_VARIABLE_METADATA_URL = f"{DASL_BASE_URL}/variableMetadata"
@@ -48,7 +48,7 @@ DASL_ASSOC_SCHOOL_DATA_URL = f"{DASL_BASE_URL}/assocSchoolData"
 DASL_ACCEPT_HEADER = "Application/vnd.nais.dasl.api+json; version=1"
 
 # Number of reporting years to load, ending with the current calendar year.
-BACKFILL_YEARS = int(os.environ.get("BACKFILL_YEARS", "3"))
+BACKFILL_YEARS = int(os.environ.get("BACKFILL_YEARS", "1"))
 
 # Subcategory IDs that return data on the stage server. 19, 20, 21, 28 return
 # 500 errors and are skipped. 13, 14, 22, 23, 24 have returned empty in probes
@@ -234,9 +234,21 @@ _CHOICE_DATA_TYPES = {"choicesingle", "choicemulti"}
 # words/phrases via the surrounding regex assertions to avoid mangling.
 # The goal: produce concise, readable snake_case column names.
 _LABEL_REPLACEMENTS: List[Tuple[str, str]] = [
+    # --- Parenthetical noise (run first so later patterns aren't confused) ---
+    # Association acronym lists like "(ISACS,EMA,VAIS,NJAIS,NYSAIS,TABS)"
+    (r"\s*\(\s*[A-Z]{2,8}(?:\s*[,/]\s*[A-Z]{2,8})+\s*\)", ""),
+    # Solo association tags
+    (r"\s*\((?:tabs|isacs|ema|vais|njais|nysais|nais)\)", ""),
+    # Year-range qualifiers
+    (r"\s*\(through\s+\d{4}-\d{2,4}\)", ""),
+    (r"\s*\(\s*\d{4}-\d{2,4}\s+forward\s*\)", "_recent"),
+    (r"\s*\(\s*previous\s+years?\s*\)", ""),
+    (r"\s*\(\s*previous\s+year\s*\)", ""),
+
+    # --- Domain-specific phrasing ---
     # Drop redundant prefix that just describes the variable group
     (r"\bgrade\s*1\s*to\s*grade\s*12\b[:\s]*", ""),
-    # Section-level abbreviations (boarding types) — applied to section text
+    # Boarding sections
     (r"\b5[\s-]*day\s+boarding\b", "b5"),
     (r"\b7[\s-]*day\s+boarding\b", "b7"),
     (r"\b5[\s-]*day\s+domestic\s+boarders[\w\s]*", "b5_domestic"),
@@ -246,7 +258,144 @@ _LABEL_REPLACEMENTS: List[Tuple[str, str]] = [
     (r"\btuition\s+and\s+fees\b", "tuition_fees"),
     (r"\btuition\s+only\b", "tuition"),
     (r"\bfees\s+only\b", "fees"),
-    # Grade level compaction: "Grade 9" -> "g9", "PK-5" -> "pk5"
+    # Survey question phrasing — drop conversational stems
+    (r"\bdoes\s+your\s+school\b\s*", ""),
+    (r"\bdo\s+you\s+have\s+(?:a\s+)?", "has_"),
+    (r"\bhow\s+many\s+", ""),
+    (r"\bwhat\s+is\s+(?:the\s+)?", ""),
+    (r"\bwhat\s+(?:percentage|percent)\s+of\s+", "pct_"),
+    (r"\bplease\s+", ""),
+    (r"\?", ""),
+    (r"\band\s*/\s*or\b", "or"),
+    # Roles / titles
+    (r"\bchief\s+financial\s+officer\b", "cfo"),
+    (r"\bchief\s+executive\s+officer\b", "ceo"),
+    (r"\bchief\s+operating\s+officer\b", "coo"),
+    (r"\bhead\s+of\s+school\b", "head"),
+    (r"\bhead\s+school\b", "head"),
+    (r"\bpresident\b", "pres"),
+    (r"\bdirector\s+of\s+(\w+)\b", r"dir_\1"),
+    # Compensation / salary
+    (r"\bsalary\s*&\s*deferred\s+compensation\b", "def_comp"),
+    (r"\bsalary\s+and\s+deferred\s+compensation\b", "def_comp"),
+    (r"\bdeferred\s+compensation\b", "def_comp"),
+    (r"\bother\s+compensation\b", "other_comp"),
+    (r"\bstandard\s+benefits\b", "benefits"),
+    (r"\bemployee\s+benefits\b", "benefits"),
+    (r"\binstructional\s+support\b", "instr_support"),
+    # Enrollment terms
+    (r"\btotal\s+school\s+enrollment\b", "enroll"),
+    (r"\benrollment\s+by\s+grade\b", "enroll_grade"),
+    (r"\btotal\s+full[\s-]*time\b", "ft"),
+    (r"\bfull[\s-]*time\b", "ft"),
+    (r"\bpart[\s-]*time\b", "pt"),
+    (r"\btotal\s+enrollment\b", "enroll"),
+    (r"\bboarding\s+enrollment\b", "boarding"),
+    (r"\btotal\s+boarding\b", "boarding"),
+    (r"\benrollment\b", "enroll"),
+    # Race / ethnicity
+    (r"\bamerican\s+indian\s+(?:and\s+|/\s*)?alaska\s+native\b", "aian"),
+    (r"\bnative\s+hawaiian\s*(?:or\s+|/\s*)?other\s+pacific\s+islander\b", "nhopi"),
+    (r"\bnative\s+hawaiian(?:other)?\s+pacific\s+islander\b", "nhopi"),
+    (r"\bus\s+citizens?\s+or\s+permanent\s+us\s+resident\b", "us"),
+    (r"\busa?\s+citizens?\s+or\s+permanent\s+u\.?s\.?\s+residents?\b", "us"),
+    (r"\bafrican\s+american\b", "afam"),
+    (r"\blatino\s*/\s*hispanic\s+american\b", "latino"),
+    (r"\bunsure\s*/\s*not\s+reported\b", "unsure"),
+    (r"\bnot\s+reported\b", "nr"),
+    (r"\bnon[\s-]*binary\b", "nb"),
+    (r"\bnon[\s-]*hispanic\b", "nonhisp"),
+    (r"\bethnicity\b", "eth"),
+    (r"\bschool\s+age\s+population\b", "sap"),
+    # International / domestic
+    (r"\binternational\s+students?\b", "intl"),
+    (r"\binternational\b", "intl"),
+    (r"\bdomestic\s+students?\b", "domestic"),
+    # Time periods
+    (r"\bcurrent\s+school\s+year\b", "csy"),
+    (r"\bprevious\s+school\s+year\b", "psy"),
+    (r"\bprior\s+school\s+year\b", "psy"),
+    (r"\bschool\s+year\b", ""),
+    (r"\bfiscal\s+year\b", "fy"),
+    (r"\bopening\s+day\b", "opening"),
+    # Quantifiers
+    (r"\btotal\s+number\s+of\b", "count"),
+    (r"\bnumber\s+of\b", "n"),
+    (r"\bpercentage\s+of\b", "pct"),
+    (r"\bpercent\s+of\b", "pct"),
+    (r"\baverage\b", "avg"),
+    (r"\bamount\b", "amt"),
+    (r"\bamounts\b", "amts"),
+    (r"\bmaximum\b", "max"),
+    (r"\bminimum\b", "min"),
+    (r"\bhighest\b", "max"),
+    (r"\blowest\b", "min"),
+    # Admission / applications
+    (r"\bapplications\s+rate\b", "app_rate"),
+    (r"\bacceptances?\s+rate\b", "accept_rate"),
+    (r"\bacceptance\s+rate\b", "accept_rate"),
+    (r"\bapplications\b", "apps"),
+    (r"\bapplication\b", "app"),
+    (r"\bacceptances\b", "accepts"),
+    (r"\bacceptance\b", "accept"),
+    (r"\binquiries\b", "inq"),
+    (r"\badmissions\b", "adm"),
+    (r"\badmission\b", "adm"),
+    (r"\battrition\b", "attr"),
+    # Financial / accounting
+    (r"\btemporarily\s+restricted\b", "temp_restr"),
+    (r"\bpermanently\s+restricted\b", "perm_restr"),
+    (r"\brestricted\b", "restr"),
+    (r"\bunrestricted\b", "unrestr"),
+    (r"\bexpenditure\b", "expend"),
+    (r"\bexpenses\b", "exp"),
+    (r"\bexpense\b", "exp"),
+    (r"\brevenue\b", "rev"),
+    (r"\bincome\b", "inc"),
+    (r"\bendowment\b", "endow"),
+    (r"\bcompensation\b", "comp"),
+    (r"\bcommitment\b", "commit"),
+    (r"\bpayments?\b", "pmts"),
+    (r"\bdonor\s+restrictions\b", "donor_restr"),
+    (r"\bfinancial\s+aid\b", "fa"),
+    (r"\btuition\s+discounting\b", "tuition_disc"),
+    (r"\bfunds\s+received\b", "funds_recd"),
+    # Programs / teaching
+    (r"\bprograms\b", "progs"),
+    (r"\bprogram\b", "prog"),
+    (r"\bteaching\s+staff\b", "teach_staff"),
+    (r"\bteachers\b", "tchrs"),
+    (r"\bteacher\b", "tchr"),
+    (r"\binstructional\b", "instr"),
+    (r"\bmedia\s*/?\s*library\b", "media_lib"),
+    (r"\bmedialibrary\b", "media_lib"),
+    # Education / families
+    (r"\beducational\s+attainment\b", "educ_attain"),
+    (r"\baggregate\b", "agg"),
+    (r"\bfamilies\b", "fams"),
+    (r"\bone\s+or\s+more\s+children\s+aged\b", "kids_aged"),
+    (r"\bone\s+or\s+more\s+children\b", "kids"),
+    (r"\bpopulation\b", "pop"),
+    # Time / period
+    (r"\bprevious\b", "prev"),
+    (r"\bcurrent\b", "curr"),
+    (r"\bpast\b", "past"),
+    (r"\bbeginning\b", "begin"),
+    # Misc compaction
+    (r"\bmarketing\s+communications?\b", "mktg_comm"),
+    (r"\blearning\s+differences?\b", "ld"),
+    (r"\bsabbatical\s+opportunities\b", "sabbatical"),
+    (r"\baid\s*/?\s*scholarships?\b", "aid_schol"),
+    (r"\breplacement\s+and?\s*renewal\b", "repl_renewal"),
+    (r"\bspecial\s+maintenance\b", "spec_maint"),
+    (r"\bcombined\s+award\b", "comb_award"),
+    (r"\btuition\s+remission\b", "tuition_rem"),
+    (r"\byears?\s+of\s+service\b", "yos"),
+    (r"\btotal\s+experience\b", "total_yrs_exp"),
+    (r"\bexperience\s+at\s+the\s+school\b", "school_exp"),
+    (r"\bexperience\b", "yrs_exp"),
+    (r"\b1\s*:\s*1\b", "1to1"),
+    # Grade level compaction
     (r"\bgrade\s+(\d+)\b", r"g\1"),
     (r"\bpre[\s-]*kindergarten\b", "pk"),
     (r"\bkindergarten\s+part[\s-]*time\b", "k_pt"),
@@ -254,21 +403,38 @@ _LABEL_REPLACEMENTS: List[Tuple[str, str]] = [
     (r"\bkindergarten\b", "k"),
     (r"\bpre[\s-]*first(?:\s+grade)?\b", "pre_first"),
     (r"\bpreschool\b", "ps"),
-    # Trailing parenthetical noise like "(TABS)" or "(through 2018-19)"
-    (r"\s*\(tabs\)", ""),
-    (r"\s*\(through\s+\d{4}-\d{2,4}\)", "_legacy"),
-    # Common verbose phrases
-    # Percentage range — run BEFORE "family paying" prefix so word boundaries
-    # work correctly on " 60-99%" rather than after underscore prefixing.
+    (r"\bpost[\s-]*graduate\b", "pg"),
+    # Family-paying tuition tier — percentage range BEFORE the prefix substitution
     (r"(\d+)\s*[-\s]\s*(\d+)\s*%\s*of\s+tuition", r"\1_\2pct"),
     (r"\bfamily\s+paying\s+", "fam_pay_"),
     (r"\bfull\s+tuition\b", "full"),
     (r"\bno\s+tuition\b", "none"),
     (r"\btotal\s+count\s+of\s+", "count_"),
-    # Strip filler
-    (r"\b(of|the|for|on|in|at|to|a|an)\b", ""),
+    # Strip generic filler & connector words
+    (r"\bof\s+the\b", ""),
+    (r"\b(of|the|for|on|in|at|to|a|an|that|which|who|whom|with|by|from)\b", ""),
 ]
 _LABEL_RES = [(re.compile(p, re.IGNORECASE), r) for p, r in _LABEL_REPLACEMENTS]
+
+
+def _dedupe_tokens(name: str) -> str:
+    """Collapse repeated tokens after sanitization. Keeps first occurrence
+    of any 4+ char token; drops repeats. "school_enroll_school_enroll_boys"
+    -> "school_enroll_boys".
+    """
+    if "_" not in name:
+        return name
+    tokens = [t for t in name.split("_") if t]
+    seen: Dict[str, bool] = {}
+    out: List[str] = []
+    for t in tokens:
+        if len(t) >= 4 and t in seen:
+            continue
+        if out and out[-1] == t:
+            continue
+        seen[t] = True
+        out.append(t)
+    return "_".join(out)
 
 
 def _clean_label_text(text: str) -> str:
@@ -286,7 +452,12 @@ def sanitize_column_name(label: str) -> str:
     name = _COLUMN_STRIP_RE.sub("", name)
     # Collapse runs of underscores from substitution
     name = re.sub(r"_+", "_", name).strip("_")
-    name = name[:200]
+    # Drop repeated tokens (e.g. "enroll_enroll" -> "enroll")
+    name = _dedupe_tokens(name)
+    # Cap at 64 chars (BQ limit is 300; we want readable + the full label is
+    # always preserved in the column DESCRIPTION metadata).
+    if len(name) > 64:
+        name = name[:64].rstrip("_")
     if name and name[0].isdigit():
         name = f"v_{name}"
     return name
@@ -384,51 +555,60 @@ def _normalize_timestamp(raw: Any) -> Optional[str]:
 # BigQuery schema
 # ---------------------------------------------------------------------------
 
+def _f(name: str, type_: str, mode: str = "NULLABLE", description: str = "") -> bigquery.SchemaField:
+    return bigquery.SchemaField(name, type_, mode, description=description)
+
+
 DIM_SCHOOL_SCHEMA = [
-    bigquery.SchemaField("school_id", "STRING", "REQUIRED"),
-    bigquery.SchemaField("dasl_school_id", "STRING"),
-    bigquery.SchemaField("school_name", "STRING"),
-    bigquery.SchemaField("city", "STRING"),
-    bigquery.SchemaField("state_code", "STRING"),
-    bigquery.SchemaField("cola_index", "FLOAT"),
-    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+    _f("school_id", "STRING", "REQUIRED",
+       "Salesforce-style school identifier used by /assocSchoolData endpoint."),
+    _f("dasl_school_id", "STRING", description="DASL legacy numeric school ID."),
+    _f("school_name", "STRING", description="School name as reported by NAIS."),
+    _f("city", "STRING", description="City."),
+    _f("state_code", "STRING", description="US state or Canadian province code."),
+    _f("cola_index", "FLOAT", description="Cost-of-living adjustment index for the school's location."),
+    _f("loaded_at", "TIMESTAMP", description="UTC timestamp this row was last loaded."),
 ]
 
 DIM_VARIABLE_SCHEMA = [
-    bigquery.SchemaField("var_id", "INTEGER", "REQUIRED"),
-    bigquery.SchemaField("category", "STRING"),
-    bigquery.SchemaField("subcategory", "STRING"),
-    bigquery.SchemaField("section", "STRING"),
-    bigquery.SchemaField("question", "STRING"),
-    bigquery.SchemaField("label", "STRING"),
-    bigquery.SchemaField("data_type", "STRING"),
-    bigquery.SchemaField("sub_category_id", "INTEGER"),
-    bigquery.SchemaField("lookup_group_id", "INTEGER"),
-    bigquery.SchemaField("association_specific", "BOOLEAN"),
-    bigquery.SchemaField("column_name", "STRING"),
-    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+    _f("var_id", "INTEGER", "REQUIRED",
+       "DASL variable identifier. Stable across years."),
+    _f("category", "STRING", description="Top-level category (1st level of the variable's label)."),
+    _f("subcategory", "STRING", description="Second level of the variable's label."),
+    _f("section", "STRING", description="Third level — usually the survey section."),
+    _f("question", "STRING", description="The actual question text (leaf level)."),
+    _f("label", "STRING", description="Full ' -> ' delimited label as DASL provides it."),
+    _f("data_type", "STRING", description="DASL datatype: integer, float, choiceSingle, choiceMulti, string, etc."),
+    _f("sub_category_id", "INTEGER", description="DASL API subCategoryId (used to fetch the variable's data)."),
+    _f("lookup_group_id", "INTEGER", description="ID of the lookup group for choice variables (FK to dim_lookup)."),
+    _f("association_specific", "BOOLEAN", description="True if this variable applies only to specific associations."),
+    _f("column_name", "STRING",
+       description="Auto-generated snake_case column name used in the wide vw_* views."),
+    _f("loaded_at", "TIMESTAMP", description="UTC timestamp this row was last loaded."),
 ]
 
 DIM_LOOKUP_SCHEMA = [
-    bigquery.SchemaField("lookup_group_id", "INTEGER", "REQUIRED"),
-    bigquery.SchemaField("group_name", "STRING"),
-    bigquery.SchemaField("lookup_key", "STRING", "REQUIRED"),
-    bigquery.SchemaField("lookup_value", "STRING"),
-    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+    _f("lookup_group_id", "INTEGER", "REQUIRED",
+       "Lookup group identifier (referenced by dim_variable.lookup_group_id)."),
+    _f("group_name", "STRING", description="Human-readable name of the lookup group, e.g. 'Yes/No'."),
+    _f("lookup_key", "STRING", "REQUIRED",
+       "The raw key as stored in fact_school_data.value_choice."),
+    _f("lookup_value", "STRING", description="Human-readable label for the key."),
+    _f("loaded_at", "TIMESTAMP", description="UTC timestamp this row was last loaded."),
 ]
 
 FACT_SCHOOL_DATA_SCHEMA = [
-    bigquery.SchemaField("school_id", "STRING", "REQUIRED"),
-    bigquery.SchemaField("year", "INTEGER", "REQUIRED"),
-    bigquery.SchemaField("var_id", "INTEGER", "REQUIRED"),
-    bigquery.SchemaField("value_numeric", "FLOAT"),
-    bigquery.SchemaField("value_string", "STRING"),
-    bigquery.SchemaField("value_choice", "STRING"),
-    bigquery.SchemaField("value_choice_label", "STRING"),
-    bigquery.SchemaField("is_na", "BOOLEAN"),
-    bigquery.SchemaField("sub_category_id", "INTEGER"),
-    bigquery.SchemaField("last_updated", "TIMESTAMP"),
-    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+    _f("school_id", "STRING", "REQUIRED", "FK to dim_school.school_id."),
+    _f("year", "INTEGER", "REQUIRED", "Reporting year (ending year of academic calendar)."),
+    _f("var_id", "INTEGER", "REQUIRED", "FK to dim_variable.var_id."),
+    _f("value_numeric", "FLOAT", description="Numeric value (populated for integer/float/currency types)."),
+    _f("value_string", "STRING", description="String value (populated for plain string types)."),
+    _f("value_choice", "STRING", description="Lookup key for choice variables."),
+    _f("value_choice_label", "STRING", description="Resolved human-readable label for choice variables."),
+    _f("is_na", "BOOLEAN", description="True if the school explicitly marked this variable as Not Applicable."),
+    _f("sub_category_id", "INTEGER", description="DASL subCategoryId this value was fetched under."),
+    _f("last_updated", "TIMESTAMP", description="DASL-reported last-update timestamp for the school's row."),
+    _f("loaded_at", "TIMESTAMP", description="UTC timestamp this row was last loaded."),
 ]
 
 
@@ -466,18 +646,17 @@ def replace_table(
 
 def ensure_fact_table(bq: bigquery.Client, table_ref: str) -> None:
     try:
-        bq.get_table(table_ref)
+        existing = bq.get_table(table_ref)
+        # Refresh column descriptions on every run in case the schema changed.
+        # We can only relax modes / update descriptions in place — the column
+        # set itself must match for this to be a no-op load.
+        existing.schema = FACT_SCHOOL_DATA_SCHEMA
+        bq.update_table(existing, ["schema"])
         return
     except NotFound:
         pass
     logger.info("Creating fact table %s", table_ref)
     table = bigquery.Table(table_ref, schema=FACT_SCHOOL_DATA_SCHEMA)
-    table.time_partitioning = bigquery.TimePartitioning(
-        type_=bigquery.TimePartitioningType.YEAR,
-        field=None,  # range partitioning set below
-    )
-    # Range partition on year (integer), clustered by school_id, var_id.
-    table.time_partitioning = None
     table.range_partitioning = bigquery.RangePartitioning(
         field="year",
         range_=bigquery.PartitionRange(start=2000, end=2100, interval=1),
@@ -655,6 +834,30 @@ def _safe_view_suffix(category: str) -> str:
     return f"vw_{suffix}"
 
 
+def _friendly_description(label: str) -> str:
+    """Build a human-readable description from a 4-level arrow-delimited label.
+
+    "Tuition and Fees -> Tuition and Fees -> 5 Day Boarding -> Grade 1 to Grade 12: Tuition Only: Grade 9"
+      -> "5 Day Boarding — Grade 1 to Grade 12: Tuition Only: Grade 9"
+    The first two levels are usually the category twice; we drop them.
+    """
+    parts = [p.strip() for p in (label or "").split(" -> ") if p.strip()]
+    if not parts:
+        return ""
+    if len(parts) >= 4:
+        section, question = parts[2], parts[3]
+        # If section is a generic repeat of the category, drop it
+        if section.lower() in (parts[0].lower(), parts[1].lower()):
+            return question
+        return f"{section} — {question}"
+    return parts[-1]
+
+
+def _sql_escape(text: str) -> str:
+    """Escape a string for inclusion inside a double-quoted SQL string literal."""
+    return (text or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
 def rebuild_category_views(
     bq: bigquery.Client,
     project: str,
@@ -663,7 +866,9 @@ def rebuild_category_views(
     column_names: Dict[int, str],
     varid_to_subcat: Dict[int, int],
 ) -> List[str]:
-    """One view per top-level category. Returns list of view IDs created."""
+    """One view per top-level category, with column descriptions auto-generated
+    from each variable's label. Returns list of view IDs created.
+    """
     fact = f"`{_qualify(project, dataset, 'fact_school_data')}`"
     school = f"`{_qualify(project, dataset, 'dim_school')}`"
 
@@ -677,11 +882,21 @@ def rebuild_category_views(
         cat = (label.split(" -> ")[0] if label else "").strip() or "Misc"
         by_category.setdefault(cat, []).append(v)
 
+    # Common columns at the start of every view
+    common_cols = [
+        ("school_id",   "School ID (Salesforce-style)."),
+        ("school_name", "School name."),
+        ("state_code",  "US state or province code."),
+        ("year",        "Reporting year (ending year of academic calendar)."),
+    ]
+
     created: List[str] = []
     for category, vars_in_cat in by_category.items():
         view_name = _safe_view_suffix(category)
         view_id = _qualify(project, dataset, view_name)
-        select_exprs: List[str] = []
+
+        # Collect (col_name, var_id, description, sql_expr) for each variable column
+        cols: List[Tuple[str, int, str, str]] = []
         used: Dict[str, int] = {}
         for v in vars_in_cat:
             vid = v.get("varId")
@@ -695,34 +910,51 @@ def rebuild_category_views(
                 used[col] = 0
             dtype = (v.get("dataType") or "").lower()
             if dtype in _NUMERIC_DATA_TYPES:
-                expr = f"MAX(IF(f.var_id = {vid}, f.value_numeric, NULL)) AS {col}"
+                expr = f"MAX(IF(f.var_id = {vid}, f.value_numeric, NULL))"
             elif dtype in _CHOICE_DATA_TYPES:
                 expr = (
                     f"MAX(IF(f.var_id = {vid}, "
-                    f"COALESCE(f.value_choice_label, f.value_choice), NULL)) AS {col}"
+                    f"COALESCE(f.value_choice_label, f.value_choice), NULL))"
                 )
             else:
-                expr = f"MAX(IF(f.var_id = {vid}, f.value_string, NULL)) AS {col}"
-            select_exprs.append("  " + expr)
+                expr = f"MAX(IF(f.var_id = {vid}, f.value_string, NULL))"
+            desc = _friendly_description(v.get("label") or "")
+            cols.append((col, vid, desc, expr))
 
-        if not select_exprs:
+        if not cols:
             continue
+
+        # Build the column list + descriptions for the CREATE VIEW header
+        header_cols = []
+        for col_name, desc in common_cols:
+            header_cols.append(f'  {col_name} OPTIONS(description="{_sql_escape(desc)}")')
+        for col_name, _vid, desc, _expr in cols:
+            header_cols.append(f'  {col_name} OPTIONS(description="{_sql_escape(desc)}")')
+
+        # Build the SELECT list
+        select_lines = [
+            "  f.school_id",
+            "  s.school_name",
+            "  s.state_code",
+            "  f.year",
+        ]
+        for col_name, _vid, _desc, expr in cols:
+            select_lines.append(f"  {expr} AS {col_name}")
 
         var_ids = ", ".join(str(v["varId"]) for v in vars_in_cat if v.get("varId") is not None)
         sql = (
-            f"CREATE OR REPLACE VIEW `{view_id}` AS\n"
+            f"CREATE OR REPLACE VIEW `{view_id}` (\n"
+            + ",\n".join(header_cols) + "\n"
+            f")\n"
+            f"AS\n"
             f"SELECT\n"
-            f"  f.school_id,\n"
-            f"  s.school_name,\n"
-            f"  s.state_code,\n"
-            f"  f.year,\n"
-            + ",\n".join(select_exprs) + "\n"
+            + ",\n".join(select_lines) + "\n"
             f"FROM {fact} f\n"
             f"LEFT JOIN {school} s USING (school_id)\n"
             f"WHERE f.var_id IN ({var_ids})\n"
             f"GROUP BY f.school_id, s.school_name, s.state_code, f.year;\n"
         )
-        logger.info("Creating view %s (%d columns)", view_id, len(select_exprs))
+        logger.info("Creating view %s (%d columns)", view_id, len(cols))
         bq.query(sql).result()
         created.append(view_id)
     return created

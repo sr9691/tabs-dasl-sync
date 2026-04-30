@@ -1,0 +1,55 @@
+WARNING: Your account does not have permission to check or bind IAM policies to project [dasl-493214]. If the deployment fails, ensure [951276441702-compute@developer.gserviceaccount.com] has the role [roles/cloudbuild.builds.builder] before retrying.
+Preparing function...
+...........done.
+Deploying function...
+[Build]........................................................................................................................................................................................................................................................................................................................................................................................................................................................................................done
+[Service].......................................................................................done
+Done.
+You can view your function in the Cloud Console here: https://console.cloud.google.com/functions/details/us-central1/dasl-sync?project=dasl-493214
+
+buildConfig:
+  automaticUpdatePolicy: {}
+  build: projects/951276441702/locations/us-central1/builds/94877c26-c9a2-4c50-a8f0-7894c69afe4b
+  dockerRegistry: ARTIFACT_REGISTRY
+  dockerRepository: projects/dasl-493214/locations/us-central1/repositories/gcf-artifacts
+  entryPoint: run_pipeline
+  runtime: python311
+  serviceAccount: projects/dasl-493214/serviceAccounts/951276441702-compute@developer.gserviceaccount.com
+  source:
+    storageSource:
+      bucket: gcf-v2-sources-951276441702-us-central1
+      generation: '1777549677993078'
+      object: dasl-sync/function-source.zip
+  sourceProvenance:
+    resolvedStorageSource:
+      bucket: gcf-v2-sources-951276441702-us-central1
+      generation: '1777549677993078'
+      object: dasl-sync/function-source.zip
+createTime: '2026-04-30T11:47:59.102670534Z'
+environment: GEN_2
+labels:
+  deployment-tool: cli-gcloud
+name: projects/dasl-493214/locations/us-central1/functions/dasl-sync
+satisfiesPzi: true
+serviceConfig:
+  allTrafficOnLatestRevision: true
+  availableCpu: '0.5833'
+  availableMemory: 1Gi
+  environmentVariables:
+    BACKFILL_YEARS: '3'
+    BQ_DATASET: dasl
+    DASL_BASE_URL: https://daslwebapi.azurewebsites.net
+    DASL_CLIENT_ID: tabs
+    DASL_CLIENT_SECRET_NAME: dasl-tabs-api-key
+    GCP_PROJECT_ID: dasl-493214
+    LOG_EXECUTION_ID: 'true'
+  ingressSettings: ALLOW_ALL
+  maxInstanceRequestConcurrency: 1
+  revision: dasl-sync-00001-mog
+  service: projects/dasl-493214/locations/us-central1/services/dasl-sync
+  serviceAccountEmail: ansa-dasl-pipeline@dasl-493214.iam.gserviceaccount.com
+  timeoutSeconds: 3600
+  uri: https://dasl-sync-wkkg2kg7uq-uc.a.run.app
+state: ACTIVE
+updateTime: '2026-04-30T11:49:01.043984077Z'
+url: https://us-central1-dasl-493214.cloudfunctions.net/dasl-sync

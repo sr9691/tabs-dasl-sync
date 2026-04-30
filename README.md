@@ -1,83 +1,79 @@
 # DASL → BigQuery Sync
 
 Google Cloud Function (Python) that extracts school data from the NAIS DASL
-RESTful API and loads it into BigQuery in a wide/columnar format (one row per
-school per year).
+RESTful API and loads it into BigQuery as a star schema, then rebuilds one
+wide view per top-level variable category for downstream BI tools.
+
+## What it writes
+
+Dataset: `dasl-493214.dasl`
+
+| Object | Type | Contents |
+| --- | --- | --- |
+| `dim_school` | table | One row per association school. |
+| `dim_variable` | table | One row per DASL variable, with auto-generated snake_case column names. |
+| `dim_lookup` | table | One row per `(lookup_group_id, key)` choice value. |
+| `fact_school_data` | table | One row per `(school_id, year, var_id)` data point. Range-partitioned by `year`, clustered by `school_id, var_id`. |
+| `vw_<category>` | view | One per top-level category — wide format, one row per `(school_id, year)`, with column descriptions auto-generated from each variable's label. |
 
 ## Behavior
 
-- **First run** (target table does not exist): creates the BigQuery table
-  with one column per DASL variable (column names derived from the metadata
-  endpoint labels) and performs a full historical backfill.
-- **Subsequent runs**: pulls the current year only and appends any rows whose
-  `(school_id, year)` pair is not already present. The function is idempotent.
-- **Cleaning**: numeric fields are stripped of `$`/`,`/spaces; `"NA"` values
-  become NULL; `choiceSingle`/`choiceMulti` values are validated against the
-  lookup groups; `last_updated` is parsed as ISO 8601. Full rules live at the
-  top of `main.py`.
-- **Authentication**: DASL `client_id` / `client_secret` are fetched at
-  runtime from Google Secret Manager. They are never written to logs.
+- **Each run** authenticates against DASL, pulls the latest metadata
+  (variables, lookup groups, association schools), then iterates every
+  `(school, year, subcategory)` slice in the configured backfill window. For
+  each slice the existing `fact_school_data` rows are deleted and replaced
+  with what DASL returned — the function is idempotent on `(school_id, year)`.
+- **Backfill window** is controlled by `BACKFILL_YEARS` (default **1** =
+  current year only). Larger values backfill more history but multiply the
+  number of API calls (~5,100 per year × ~204 schools × ~25 subcategories).
+- **Cleaning**: numeric fields are stripped of `$`/`,`/spaces; explicit `NA`
+  values become NULL; `choiceSingle` / `choiceMulti` values are resolved
+  against the lookup groups; `last_updated` is normalized to UTC ISO 8601.
+  Full rules live at the top of `main.py`.
+- **Authentication**: the DASL client secret is fetched at runtime from
+  Google Secret Manager (`DASL_CLIENT_SECRET_NAME`). Credentials are never
+  logged.
 
 ## Files
 
-- `main.py` — Cloud Function entry point (`run_pipeline`) and pipeline logic
-- `requirements.txt` — Python dependencies
-- `README.md` — this file
+| Path | Purpose |
+| --- | --- |
+| `main.py` | Cloud Function entry point (`run_pipeline`) and pipeline logic. |
+| `requirements.txt` | Python dependencies. |
+| `run_local.py` | Local driver — calls `main.run()` directly using ADC / a local SA key. |
+| `.gcloudignore` | Excludes the SA key, dev scripts, and CSV/JSON artifacts from the deploy bundle. |
+| `export_metadata.py` | One-shot helper that dumped `variables.csv`, `lookup_values.csv`, etc. for inspection. |
+| `create_tuition_tall_view.sql` | Optional unpivoted view of the tuition columns (run manually if useful). |
+| `*.csv`, `varid_subcat_map.json`, `swagger.tmp.json` | Reference / inspection artifacts; not used at runtime. |
 
-## Required environment variables
+## Environment variables
 
-| Name                       | Description                                           |
-| -------------------------- | ----------------------------------------------------- |
-| `GCP_PROJECT_ID`           | Google Cloud project ID                               |
-| `BQ_DATASET`               | BigQuery dataset name (must already exist)            |
-| `BQ_TABLE`                 | BigQuery table name (created on first run)            |
-| `DASL_CLIENT_ID_SECRET`    | Secret Manager secret name holding the DASL client ID |
-| `DASL_CLIENT_SECRET_SECRET`| Secret Manager secret name holding the client secret  |
+All have defaults baked into `main.py`; override only if you need to.
 
-## One-time setup
+| Name | Default | Purpose |
+| --- | --- | --- |
+| `GCP_PROJECT_ID` | `dasl-493214` | Google Cloud project ID. |
+| `BQ_DATASET` | `dasl` | BigQuery dataset (created if missing). |
+| `DASL_BASE_URL` | `https://daslwebapi.azurewebsites.net` | DASL API root. Use `https://stagedaslwebapi.azurewebsites.net` for staging. |
+| `DASL_CLIENT_ID` | `tabs` | DASL OAuth client ID (literal value, not a secret). |
+| `DASL_CLIENT_SECRET_NAME` | `dasl-tabs-api-key` | Secret Manager secret holding the DASL client secret. |
+| `BACKFILL_YEARS` | `1` | Number of trailing reporting years to load each run. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | _(local only)_ | Path to a SA key file. Cloud Functions use the runtime SA via ADC. |
 
-### 1. Create the BigQuery dataset
+## Production deployment
 
-```bash
-bq --location=US mk --dataset "$GCP_PROJECT_ID:dasl"
-```
+Already live in `dasl-493214`:
 
-### 2. Store DASL credentials in Secret Manager
+- **Function**: `dasl-sync` (Gen2, us-central1) — `https://us-central1-dasl-493214.cloudfunctions.net/dasl-sync`
+- **Runtime SA**: `ansa-dasl-pipeline@dasl-493214.iam.gserviceaccount.com` (has `roles/bigquery.dataEditor`, `roles/bigquery.jobUser`, `roles/secretmanager.secretAccessor`, `roles/run.invoker`).
+- **Schedule**: Cloud Scheduler `dasl-sync-weekly` — `0 6 * * 1` America/New_York (Mondays 6 AM ET), OIDC-authenticated with the same SA.
 
-```bash
-gcloud secrets create dasl-client-id --replication-policy="automatic"
-printf '%s' 'YOUR_CLIENT_ID' | gcloud secrets versions add dasl-client-id --data-file=-
-
-gcloud secrets create dasl-client-secret --replication-policy="automatic"
-printf '%s' 'YOUR_CLIENT_SECRET' | gcloud secrets versions add dasl-client-secret --data-file=-
-```
-
-### 3. Grant the Cloud Function's runtime service account access
-
-Replace `SA_EMAIL` with the service account the function runs as (default:
-`PROJECT_NUMBER-compute@developer.gserviceaccount.com`).
-
-```bash
-# Secret Manager read
-gcloud secrets add-iam-policy-binding dasl-client-id \
-  --member="serviceAccount:SA_EMAIL" --role="roles/secretmanager.secretAccessor"
-gcloud secrets add-iam-policy-binding dasl-client-secret \
-  --member="serviceAccount:SA_EMAIL" --role="roles/secretmanager.secretAccessor"
-
-# BigQuery write
-gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
-  --member="serviceAccount:SA_EMAIL" --role="roles/bigquery.dataEditor"
-gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
-  --member="serviceAccount:SA_EMAIL" --role="roles/bigquery.jobUser"
-```
-
-## Deploy
-
-From this directory:
+### Re-deploy after a code change
 
 ```bash
 gcloud functions deploy dasl-sync \
   --gen2 \
+  --project=dasl-493214 \
   --runtime=python311 \
   --region=us-central1 \
   --source=. \
@@ -86,59 +82,125 @@ gcloud functions deploy dasl-sync \
   --no-allow-unauthenticated \
   --timeout=3600 \
   --memory=1Gi \
-  --set-env-vars="GCP_PROJECT_ID=your-project,BQ_DATASET=dasl,BQ_TABLE=school_data,DASL_CLIENT_ID_SECRET=dasl-client-id,DASL_CLIENT_SECRET_SECRET=dasl-client-secret"
+  --service-account=ansa-dasl-pipeline@dasl-493214.iam.gserviceaccount.com \
+  --set-env-vars="GCP_PROJECT_ID=dasl-493214,BQ_DATASET=dasl,DASL_BASE_URL=https://daslwebapi.azurewebsites.net,DASL_CLIENT_ID=tabs,DASL_CLIENT_SECRET_NAME=dasl-tabs-api-key,BACKFILL_YEARS=1"
 ```
 
-The first deploy runs the full backfill and can take a while (~200 schools ×
-~20 years × 1 request each). A 1-hour timeout is recommended.
-
-## Triggering manually
-
-### From Cloud Console
-
-1. Open **Cloud Functions** → **dasl-sync** → **Testing** tab.
-2. Click **Test the function** with an empty body `{}`.
-3. The response body contains the summary message; full logs appear in the
-   **Logs** tab.
-
-### From the command line
+To update only an env var without rebuilding:
 
 ```bash
-gcloud functions call dasl-sync --region=us-central1
-
-# Or hit the HTTPS endpoint directly with an auth token:
-curl -X POST \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
-  "$(gcloud functions describe dasl-sync --region=us-central1 --format='value(serviceConfig.uri)')"
+gcloud functions deploy dasl-sync --gen2 --project=dasl-493214 \
+  --region=us-central1 --update-env-vars="BACKFILL_YEARS=2"
 ```
 
-## Scheduling annual runs with Cloud Scheduler
-
-DASL publishes new data roughly once a year. Schedule the function to run
-every week — no-op after the first successful run because duplicate
-`(school_id, year)` rows are skipped.
+### Trigger manually
 
 ```bash
-FUNCTION_URL="$(gcloud functions describe dasl-sync --region=us-central1 --format='value(serviceConfig.uri)')"
-SA_EMAIL="PROJECT_NUMBER-compute@developer.gserviceaccount.com"
+# CLI (uses your gcloud identity for OIDC)
+gcloud functions call dasl-sync --region=us-central1 --project=dasl-493214
 
+# Or hit the Cloud Run URL directly
+curl -X POST -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  https://dasl-sync-wkkg2kg7uq-uc.a.run.app
+```
+
+### Logs
+
+```bash
+gcloud functions logs read dasl-sync --region=us-central1 --project=dasl-493214 --limit=200
+```
+
+Look for the `Pipeline summary:` line — it has years loaded, school/variable
+counts, fact-row count, and API-call/error counts.
+
+## Local development
+
+```bash
+pip install -r requirements.txt
+# Place the SA key at the path GOOGLE_APPLICATION_CREDENTIALS expects, then:
+python run_local.py
+```
+
+The local driver invokes `main.run()` directly (no Functions Framework). A
+full prod backfill takes ~3.5 hours over a residential connection; in Cloud
+Functions it's faster, but the 60-minute timeout is the reason
+`BACKFILL_YEARS` defaults to 1.
+
+## Useful BigQuery query
+
+`dasl_coverage_by_year_category` — one row per (year, top-level category)
+with school count, variables filled, and populated %:
+
+```sql
+WITH per_slice AS (
+  SELECT
+    f.year,
+    v.category,
+    f.school_id,
+    f.var_id,
+    f.is_na,
+    CASE
+      WHEN f.value_numeric IS NOT NULL OR f.value_string IS NOT NULL OR f.value_choice IS NOT NULL
+      THEN 1 ELSE 0
+    END AS has_value
+  FROM `dasl-493214.dasl.fact_school_data` f
+  JOIN `dasl-493214.dasl.dim_variable`     v USING (var_id)
+)
+SELECT
+  year,
+  category,
+  COUNT(DISTINCT school_id)                         AS schools_reporting,
+  COUNT(DISTINCT var_id)                            AS variables_with_data,
+  COUNT(*)                                          AS data_points,
+  SUM(has_value)                                    AS non_null_values,
+  SUM(CASE WHEN is_na THEN 1 ELSE 0 END)            AS na_marked,
+  ROUND(100 * SUM(has_value) / COUNT(*), 1)         AS pct_populated
+FROM per_slice
+GROUP BY year, category
+ORDER BY year DESC, data_points DESC;
+```
+
+## One-time setup (reference, already done)
+
+### 1. Dataset
+
+```bash
+bq --location=US mk --dataset "dasl-493214:dasl"
+```
+
+### 2. Secret Manager
+
+```bash
+gcloud secrets create dasl-tabs-api-key --replication-policy="automatic"
+printf '%s' 'YOUR_DASL_CLIENT_SECRET' | \
+  gcloud secrets versions add dasl-tabs-api-key --data-file=-
+```
+
+### 3. Runtime SA grants
+
+```bash
+SA="ansa-dasl-pipeline@dasl-493214.iam.gserviceaccount.com"
+
+gcloud secrets add-iam-policy-binding dasl-tabs-api-key \
+  --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+
+gcloud projects add-iam-policy-binding dasl-493214 \
+  --member="serviceAccount:$SA" --role="roles/bigquery.dataEditor"
+gcloud projects add-iam-policy-binding dasl-493214 \
+  --member="serviceAccount:$SA" --role="roles/bigquery.jobUser"
+```
+
+### 4. Scheduler
+
+```bash
 gcloud scheduler jobs create http dasl-sync-weekly \
+  --project=dasl-493214 \
   --location=us-central1 \
   --schedule="0 6 * * 1" \
   --time-zone="America/New_York" \
   --http-method=POST \
-  --uri="$FUNCTION_URL" \
-  --oidc-service-account-email="$SA_EMAIL" \
-  --oidc-token-audience="$FUNCTION_URL" \
-  --attempt-deadline=3600s
+  --uri="https://dasl-sync-wkkg2kg7uq-uc.a.run.app" \
+  --oidc-service-account-email="ansa-dasl-pipeline@dasl-493214.iam.gserviceaccount.com" \
+  --oidc-token-audience="https://dasl-sync-wkkg2kg7uq-uc.a.run.app" \
+  --attempt-deadline=1800s
 ```
-
-The scheduler service account needs `roles/cloudfunctions.invoker` (gen2:
-`roles/run.invoker` on the underlying Cloud Run service).
-
-## Monitoring
-
-Logs are written via Python `logging` and are visible in Cloud Logging under
-the `dasl-sync` function. Look for the `Pipeline summary:` line for a
-machine-readable summary of each run, including cleaning counts (nullified
-values, skipped rows, validation warnings).

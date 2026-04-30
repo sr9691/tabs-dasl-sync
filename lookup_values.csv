@@ -1,0 +1,255 @@
+lookupGroupId,groupName,key,value
+1,Yes/No,Y,Yes
+1,Yes/No,N,No
+3,Gender/School,B,Boys
+3,Gender/School,G,Girls
+3,Gender/School,C,Coed
+4,Person of Color,AFRICAN AMER,African American
+4,Person of Color,LATINO/HISP AMER,Latino/Hispanic
+4,Person of Color,ASIAN AMER,Asian American
+4,Person of Color,NATIVE AMER,Native American
+4,Person of Color,MIDDLE EAST AMER,Middle Eastern American
+4,Person of Color,MULTIRACIAL,Multiracial
+4,Person of Color,PACIFIC ISLAND AMER,Pacific Island Amer
+4,Person of Color,EUROPEAN AMER,"Caucasian, Non-Hispanic"
+4,Person of Color,INTERNATIONAL,International
+4,Person of Color,NOT SURE,Not Sure
+5,Time,F,Full-Time
+5,Time,P,Part-Time
+6,Housing Benfit,N,None
+6,Housing Benfit,F,Full
+6,Housing Benfit,S,Stipend
+7,Grade,PS,Preschool
+7,Grade,K,Kindergarten
+7,Grade,01,Grade 1
+7,Grade,02,Grade 2
+7,Grade,03,Grade 3
+7,Grade,04,Grade 4
+7,Grade,05,Grade 5
+7,Grade,06,Grade 6
+7,Grade,07,Grade 7
+7,Grade,08,Grade 8
+7,Grade,09,Grade 9
+7,Grade,10,Grade 10
+7,Grade,11,Grade 11
+7,Grade,12,Grade 12
+7,Grade,PG,Post Graduate
+8,Type,D,Day
+8,Type,DB,Day-Boarding
+8,Type,BD,Boarding-Day
+8,Type,B,Boarding
+10,Cash Gift Prp,UNRESTRICTED,Unrestricted Use
+10,Cash Gift Prp,Restricted,Restricted Use
+10,Cash Gift Prp,BUILDING,New Building
+10,Cash Gift Prp,Fin Aid,Financial Aid
+10,Cash Gift Prp,New Ath,New Athletic Area
+10,Cash Gift Prp,New Caf,New Cafeteria
+10,Cash Gift Prp,New Trans,New Transportation System
+10,Cash Gift Prp,New Comp,New Computers
+10,Cash Gift Prp,TECHNOLOGY,New Technology
+10,Cash Gift Prp,New Swim,New Swimming Pool
+10,Cash Gift Prp,OFFICE SPACE,Office Space
+10,Cash Gift Prp,Bldg Maint,Building Maintenance
+10,Cash Gift Prp,Spec Act,Special Activities
+10,Cash Gift Prp,ENDOWMENT,Endowment
+10,Cash Gift Prp,SALARIES,Better Salaries
+10,Cash Gift Prp,OTHER,Other
+11,Years,1995,1995
+11,Years,1996,1996
+11,Years,1997,1997
+11,Years,1998,1998
+11,Years,1999,1999
+11,Years,2000,2000
+11,Years,2001,2001
+11,Years,2002,2002
+11,Years,2003,2003
+11,Years,2004,2004
+11,Years,2005,2005
+11,Years,2006,2006
+11,Years,2007,2007
+11,Years,2008,2008
+11,Years,2009,2009
+11,Years,2010,2010
+11,Years,2011,2011
+11,Years,2012,2012
+11,Years,2013,2013
+11,Years,2014,2014
+11,Years,2015,2015
+11,Years,2016,2016
+11,Years,2017,2017
+11,Years,2018,2018
+11,Years,2019,2019
+11,Years,2020,2020
+11,Years,2021,2021
+11,Years,2022,2022
+11,Years,2023,2023
+11,Years,2024,2024
+11,Years,2025,2025
+11,Years,2026,2026
+11,Years,2027,2027
+11,Years,2028,2028
+11,Years,2029,2029
+12,ReligiousAffiliation,Anglican,Anglican
+12,ReligiousAffiliation,Baptist,Baptist
+12,ReligiousAffiliation,Buddhist,Buddhist
+12,ReligiousAffiliation,Catholic,Catholic
+12,ReligiousAffiliation,Catholic Diocesan,Catholic Diocesan
+12,ReligiousAffiliation,Catholic Non-Diocesan,Catholic Non-Diocesan
+12,ReligiousAffiliation,Christian,Christian
+12,ReligiousAffiliation,Christian Science,Christian Science
+12,ReligiousAffiliation,Congregational,Congregational
+12,ReligiousAffiliation,Episcopal,Episcopal
+12,ReligiousAffiliation,Hindu,Hindu
+12,ReligiousAffiliation,Interfaith,Interfaith
+12,ReligiousAffiliation,Jewish,Jewish
+12,ReligiousAffiliation,Lutheran,Lutheran
+12,ReligiousAffiliation,Methodist,Methodist
+12,ReligiousAffiliation,Moravian,Moravian
+12,ReligiousAffiliation,Muslim,Muslim
+12,ReligiousAffiliation,Non-Denom,Non-Denom
+12,ReligiousAffiliation,Non-Sectarian,Non-Sectarian
+12,ReligiousAffiliation,Orthodox,Orthodox
+12,ReligiousAffiliation,Presbyterian,Presbyterian
+12,ReligiousAffiliation,Protestant,Protestant
+12,ReligiousAffiliation,Friends,Quaker/Friends
+12,ReligiousAffiliation,Secular,Secular
+12,ReligiousAffiliation,Seventh Day Adventist,Seventh Day Adventist
+12,ReligiousAffiliation,United Church,United Church
+12,ReligiousAffiliation,Other,Other
+50,Yes/No/Sometimes,Yes,Yes
+50,Yes/No/Sometimes,No,No
+50,Yes/No/Sometimes,Sometimes,Sometimes
+89,Ethnicity,Latinx/Hispanic,Latinx/Hispanic
+89,Ethnicity,Not Latinx/Hispanic,Not Latinx/Hispanic
+89,Ethnicity,Unsure/Not Reported,Unsure/Not Reported
+90,Race,Asian,Asian
+90,Race,Black/African American,Black/African American
+90,Race,Middle Eastern,Middle Eastern
+90,Race,Native American,Native American
+90,Race,Native Hawaiian / Other Pacific Islander,Native Hawaiian / Other Pacific Islander
+90,Race,White,White
+90,Race,Two or More Races,Two or More Races
+90,Race,Race Not Listed,Race Not Listed
+90,Race,Unsure/Not Reported,Unsure/Not Reported
+91,WorkYear,Academic Year,Academic Year
+91,WorkYear,Full Year,Full Year
+96,NBOA Contra Expense,contra to revenue,contra to revenue
+96,NBOA Contra Expense,an expense,an expense
+97,CashOrGAAP,cash basis,cash basis
+97,CashOrGAAP,GAAP basis,GAAP basis
+98,GENDER/NEW,M,Male
+98,GENDER/NEW,F,Female
+98,GENDER/NEW,NB,Non-Binary
+98,GENDER/NEW,NR,Not Reported
+99,ADVAADQUIETACTIVE,Quiet,Quiet
+99,ADVAADQUIETACTIVE,Active,Active
+102,Administrator Positions,PoS,President of School
+102,Administrator Positions,HoS,Head of School
+102,Administrator Positions,CoHead,Co-Head
+102,Administrator Positions,BO,Chief Financial Officer
+102,Administrator Positions,AssocHead,Associate Head
+102,Administrator Positions,AsstHead,Assistant Head
+102,Administrator Positions,USHead,Upper School Head
+102,Administrator Positions,MSHead,Middle School Head
+102,Administrator Positions,LSHead,Lower School Head
+102,Administrator Positions,DrOfAdv,Director of Advancement
+102,Administrator Positions,DrOfDev,Director of Development
+102,Administrator Positions,DrOfPR,Director of Public Relations/Communications
+102,Administrator Positions,DrOfAdm,Director of Admissions
+102,Administrator Positions,DrOfFinAid,Director of Financial Aid
+102,Administrator Positions,DrOfAlum,Director of Alumni/ae Affairs
+102,Administrator Positions,DrOfDiv,Director of Diversity
+102,Administrator Positions,DrOfIntStu,Director of International Studies
+102,Administrator Positions,DrOfGE,Director of Global Education
+102,Administrator Positions,DrOfHR,Director of HR
+102,Administrator Positions,DrOfPP,Director of Physical Plant
+102,Administrator Positions,Contr,Controller
+102,Administrator Positions,DrOfIT,Director of Technology/IT
+102,Administrator Positions,DrOfTech,Director of Tech/Curriculum
+102,Administrator Positions,IR,Institutional Researcher
+102,Administrator Positions,ADH,Highest Paid Academic Dept. Head
+102,Administrator Positions,DrOfStud,Director of Studies
+102,Administrator Positions,DeOfStu,Dean of Students
+102,Administrator Positions,DrOfCC,Director of College Counseling
+102,Administrator Positions,Psyc,Psychologist
+102,Administrator Positions,AthDir,Athletic Director
+102,Administrator Positions,HAsst,Head's Assistant
+103,Place of work,In Person,In Person
+103,Place of work,Hybrid,Hybrid
+103,Place of work,Remote,Remote
+109,LTOP,Solely online school,Solely online school
+109,LTOP,Online option offered,Online option offered
+109,LTOP,Second program,Second program
+110,UngradedStu,2 years and younger,2 years and younger
+110,UngradedStu,3 years old,3 years old
+110,UngradedStu,4 years old,4 years old
+110,UngradedStu,5 years old,5 years old
+110,UngradedStu,6 years old,6 years old
+110,UngradedStu,7 years old,7 years old
+110,UngradedStu,8 years old,8 years old
+110,UngradedStu,9 years old,9 years old
+110,UngradedStu,10 years old,10 years old
+110,UngradedStu,11 years old,11 years old
+110,UngradedStu,12 years old,12 years old
+110,UngradedStu,13 years old,13 years old
+110,UngradedStu,14 years old,14 years old
+110,UngradedStu,15 years old,15 years old
+110,UngradedStu,16 years old,16 years old
+110,UngradedStu,17 years old,17 years old
+110,UngradedStu,18 years old,18 years old
+110,UngradedStu,19 years and older,19 years and older
+111,SCHGOV,Independent School,Independent School
+111,SCHGOV,Independent - religious,Independent - religious
+111,SCHGOV,School within a School,School within a School
+111,SCHGOV,"School within non-profit, non-religious org","School within non-profit, non-religious org"
+111,SCHGOV,Private - religious,Private - religious
+111,SCHGOV,Private for-profit,Private for-profit
+111,SCHGOV,Franchise,Franchise
+111,SCHGOV,Micro-school or Learning Pods,Micro-school or Learning Pods
+111,SCHGOV,Other,Other
+112,AccredList,American Montessori Society,American Montessori Society
+112,AccredList,Association Montessori Internationale (AMI),Association Montessori Internationale (AMI)
+112,AccredList,Association of Christian Schools International (ACSI),Association of Christian Schools International (ACSI)
+112,AccredList,Association of Colorado Independent Schools (ACIS),Association of Colorado Independent Schools (ACIS)
+112,AccredList,Association of Independent Maryland and DC Schools (AIMS),Association of Independent Maryland and DC Schools (AIMS)
+112,AccredList,Association of Independent Schools in New England (AISNE),Association of Independent Schools in New England (AISNE)
+112,AccredList,Association of Waldorf Schools of North America (AWSNA),Association of Waldorf Schools of North America (AWSNA)
+112,AccredList,California Association of Independent Schools (CAIS/CA),California Association of Independent Schools (CAIS/CA)
+112,AccredList,Canadian Accredited Independent Schools (CAIS/CAN),Canadian Accredited Independent Schools (CAIS/CAN)
+112,AccredList,Connecticut Association of Independent Schools (CAIS/CT),Connecticut Association of Independent Schools (CAIS/CT)
+112,AccredList,Council of British International Schools (COBIS),Council of British International Schools (COBIS)
+112,AccredList,Council of International Schools (CIS),Council of International Schools (CIS)
+112,AccredList,Florida Council of Independent Schools (FCIS),Florida Council of Independent Schools (FCIS)
+112,AccredList,Hawaii Association of Independent Schools (HAIS),Hawaii Association of Independent Schools (HAIS)
+112,AccredList,Independent Schools Association of the Central States (ISACS),Independent Schools Association of the Central States (ISACS)
+112,AccredList,Independent Schools Association of the Southwest (ISAS),Independent Schools Association of the Southwest (ISAS)
+112,AccredList,International Council Advancing Independent School Accredidation (ICAISA) ,International Council Advancing Independent School Accreditation (ICAISA) 
+112,AccredList,"Middle States Association of Colleges and Schools, the Commissions on Elementary and Secondary Schools (MSA-CESS)","Middle States Association of Colleges and Schools, the Commissions on Elementary and Secondary Schools (MSA-CESS)"
+112,AccredList,New England American Society for Information Service (NEASIS),New England American Society for Information Service (NEASIS)
+112,AccredList,New England Association of Schools and Colleges / Commission on Independent Schools (NEASC/CIS),New England Association of Schools and Colleges / Commission on Independent Schools (NEASC/CIS)
+112,AccredList,New England Association of Schools and Colleges / Commission on International Education (NEASC/CIE),New England Association of Schools and Colleges / Commission on International Education (NEASC/CIE)
+112,AccredList,New Jersey Association of Independent Schools (NJAIS),New Jersey Association of Independent Schools (NJAIS)
+112,AccredList,New York State Association of Independent Schools (NYSAIS),New York State Association of Independent Schools (NYSAIS)
+112,AccredList,"North Central Association Commission on Accreditation and School Improvement (NCA CASI), a division of Cognia","North Central Association Commission on Accreditation and School Improvement (NCA CASI), a division of Cognia"
+112,AccredList,"Northwest Accreditation Commission (NWAC), a division of Cognia","Northwest Accreditation Commission (NWAC), a division of Cognia"
+112,AccredList,Northwest Association of Accredited Schools (NAAS),Northwest Association of Accredited Schools (NAAS)
+112,AccredList,Northwest Association of Independent Schools (NWAIS),Northwest Association of Independent Schools (NWAIS)
+112,AccredList,"Not accredited, working toward accred","Not accredited, working toward accred"
+112,AccredList,Pennsylvania Association of Independent Schools (PAIS),Pennsylvania Association of Independent Schools (PAIS)
+112,AccredList,Pennsylvania Association of Private Academic Schools (PAPAS),Pennsylvania Association of Private Academic Schools (PAPAS)
+112,AccredList,PRIZMAH - Canadian Schools Only,PRIZMAH - Canadian Schools Only
+112,AccredList,"Southern Association of Colleges and Schools on Accreditation and School Improvement (SACS CASI), a division of Cognia","Southern Association of Colleges and Schools on Accreditation and School Improvement (SACS CASI), a division of Cognia"
+112,AccredList,Southern Association of Independent Schools (SAIS),Southern Association of Independent Schools (SAIS)
+112,AccredList,Southwestern Association of Episcopal Schools (SAES),Southwestern Association of Episcopal Schools (SAES)
+112,AccredList,Virginia Association of Independent Schools (VAIS),Virginia Association of Independent Schools (VAIS)
+112,AccredList,Western Association of Schools and Colleges (WASC),Western Association of Schools and Colleges (WASC)
+112,AccredList,Other,Other
+122,TABSBOARDINGCANDIDATEDEF,US Citizenship,USCitizenship
+122,TABSBOARDINGCANDIDATEDEF,US Residence,USResidence
+122,TABSBOARDINGCANDIDATEDEF,Student Self-Identified,SelfIdentified
+122,TABSBOARDINGCANDIDATEDEF,Other,Other
+123,TABSSCHOOLDEFOFINTLCANDIDATE,Foreign Citizenship with no US Citizenship of any kind,JustForeign
+123,TABSSCHOOLDEFOFINTLCANDIDATE,Foreign Citizenship even with US Citizenship,ForeignWithUS
+123,TABSSCHOOLDEFOFINTLCANDIDATE,Foreign Residence,ForeignResidence
+123,TABSSCHOOLDEFOFINTLCANDIDATE,Student Self-Identified,SelfIdentified
+123,TABSSCHOOLDEFOFINTLCANDIDATE,Other,Other

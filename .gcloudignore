@@ -1,0 +1,31 @@
+.gcloudignore
+.gitignore
+.git
+.github
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+
+# Local-only artifacts
+*.json
+!package.json
+!package-lock.json
+.env
+*.log
+*.stackdump
+*.tmp
+*.csv
+swagger.tmp.json
+varid_subcat_map.json
+verify_bq_access.ps1
+run_local.py
+export_metadata.py
+create_tuition_tall_view.sql
+pipeline_run.log
+
+# Docs
+README.md
+"Google Cloud Project.txt"
