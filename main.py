@@ -203,22 +203,25 @@ class DaslClient:
     def get_assoc_schools(self) -> List[Dict[str, Any]]:
         return self._unwrap(self.get(DASL_ASSOC_SCHOOL_URL), "schoolEntries")
 
-    def get_school_subcategory_data(
-        self, school_id: str, year: int, sub_category_id: int
-    ) -> Optional[Dict[str, Any]]:
-        """Return the `schoolEntry` dict for one (school, year, subcategory) slice."""
-        url = f"{DASL_ASSOC_SCHOOL_DATA_URL}/{school_id}"
+    def get_assoc_school_data(
+        self, year: int, sub_category_id: int
+    ) -> List[Dict[str, Any]]:
+        """Return all schoolEntries for one (year, subcategory) slice.
+
+        Uses the bulk /assocSchoolData endpoint (no schoolId in the path).
+        The per-school endpoint /assocSchoolData/{schoolId} returns 404 for a
+        large fraction of schools that nevertheless have valid data accessible
+        via this bulk endpoint, so we avoid it.
+        """
         params = {"year": year, "subCategoryId": sub_category_id}
         try:
-            payload = self.get(url, params=params)
+            payload = self.get(DASL_ASSOC_SCHOOL_DATA_URL, params=params)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else None
             if status in (404, 204):
-                return None
+                return []
             raise
-        if not isinstance(payload, dict):
-            return None
-        return payload.get("schoolEntry")
+        return self._unwrap(payload, "schoolEntries")
 
 
 # ---------------------------------------------------------------------------
@@ -1011,32 +1014,33 @@ def run(project_id: str, dataset: str) -> Dict[str, Any]:
                     lookup_value_map[(gid, str(key))] = str(val)
 
     # --- Fetch data points -----------------------------------------------
+    # One bulk call per (year, subcategory) returns all schoolEntries with
+    # their dataPoints, avoiding the per-school endpoint's 404 bug.
     varid_to_subcat: Dict[int, int] = {}
     fact_rows: List[Dict[str, Any]] = []
-    slices: List[Tuple[str, int]] = []
+    slices: List[Tuple[str, int]] = [
+        (s["schoolId"], yr) for s in mapped_schools for yr in years
+    ]
     api_calls = 0
     api_errors = 0
 
-    for school in mapped_schools:
-        sid = school["schoolId"]
-        for year in years:
-            slices.append((sid, year))
-            last_updated_for_slice: Optional[str] = None
-            for scid in VALID_SUBCATEGORY_IDS:
-                if scid in BROKEN_SUBCATEGORY_IDS:
-                    continue
-                api_calls += 1
-                try:
-                    entry = dasl.get_school_subcategory_data(sid, year, scid)
-                except Exception as exc:  # noqa: BLE001
-                    api_errors += 1
-                    logger.warning("school=%s year=%d subcat=%d failed: %s", sid, year, scid, exc)
-                    continue
-                if not entry:
+    for year in years:
+        for scid in VALID_SUBCATEGORY_IDS:
+            if scid in BROKEN_SUBCATEGORY_IDS:
+                continue
+            api_calls += 1
+            try:
+                entries = dasl.get_assoc_school_data(year, scid)
+            except Exception as exc:  # noqa: BLE001
+                api_errors += 1
+                logger.warning("year=%d subcat=%d failed: %s", year, scid, exc)
+                continue
+            logger.info("year=%d subcat=%d: %d schoolEntries", year, scid, len(entries))
+            for entry in entries:
+                sid = _coerce_string(entry.get("schoolId"))
+                if not sid:
                     continue
                 last_updated = _normalize_timestamp(entry.get("lastUpdated"))
-                if last_updated and (not last_updated_for_slice or last_updated > last_updated_for_slice):
-                    last_updated_for_slice = last_updated
                 for dp in entry.get("dataPoints") or []:
                     vid = dp.get("varId")
                     if vid is not None:
@@ -1054,7 +1058,6 @@ def run(project_id: str, dataset: str) -> Dict[str, Any]:
                     )
                     if row is not None:
                         fact_rows.append(row)
-        logger.info("Finished school %s: running fact_rows=%d", sid, len(fact_rows))
 
     logger.info("API calls: %d (errors: %d). Fact rows: %d",
                 api_calls, api_errors, len(fact_rows))

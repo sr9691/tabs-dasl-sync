@@ -19,13 +19,19 @@ Dataset: `dasl-493214.dasl`
 ## Behavior
 
 - **Each run** authenticates against DASL, pulls the latest metadata
-  (variables, lookup groups, association schools), then iterates every
-  `(school, year, subcategory)` slice in the configured backfill window. For
-  each slice the existing `fact_school_data` rows are deleted and replaced
-  with what DASL returned — the function is idempotent on `(school_id, year)`.
+  (variables, lookup groups, association schools), then for every
+  `(year, subcategory)` in the configured backfill window makes one bulk call
+  to `/assocSchoolData?subCategoryId=X&year=Y` — the response contains all
+  schools' data points for that slice. Existing `fact_school_data` rows for
+  every `(school_id, year)` are deleted before the new rows are appended, so
+  the function is idempotent on `(school_id, year)`.
+- The bulk endpoint is used instead of the per-school
+  `/assocSchoolData/{schoolId}` endpoint because the latter returns 404 for
+  ~30-40% of schools that nevertheless have valid data available via the bulk
+  call. See the comment in `main.py` near `get_assoc_school_data`.
 - **Backfill window** is controlled by `BACKFILL_YEARS` (default **1** =
-  current year only). Larger values backfill more history but multiply the
-  number of API calls (~5,100 per year × ~204 schools × ~25 subcategories).
+  current year only). Each year costs ~25 API calls (one per subcategory),
+  so a 3-year backfill runs in well under a minute.
 - **Cleaning**: numeric fields are stripped of `$`/`,`/spaces; explicit `NA`
   values become NULL; `choiceSingle` / `choiceMulti` values are resolved
   against the lookup groups; `last_updated` is normalized to UTC ISO 8601.
